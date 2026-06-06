@@ -139,10 +139,10 @@ function updateLoginBadge_() {
 
 function validateLoginSession_(session, source) {
   source = source || 'Login';
-  // v2.6.16 supports either a direct session object or a wrapped {ok, session}.
+  // v2.6.16+ supports either a direct session object or a wrapped {ok, session}.
   if (session && session.session && typeof session.session === 'object') session = session.session;
   if (!session || typeof session !== 'object') {
-    throw new Error(source + ' failed: the server returned no session. Make sure Security.gs v2.6.19 is installed and redeployed.');
+    throw new Error(source + ' failed: the server returned no session. Redeploy Security.gs/Client.html v2.6.21, then hard-refresh the web app.');
   }
   if (session.ok === false) {
     throw new Error(source + ' failed: ' + (session.error || session.message || 'Unknown server error.'));
@@ -316,7 +316,9 @@ async function connectKey() {
       accessLevel: 'Custom/Member',
       autoSync: !!(document.getElementById('autoSyncConsentInput') && document.getElementById('autoSyncConsentInput').checked)
     };
-    const session = validateLoginSession_(await gas('scAuthLogin', 'TORN_API_KEY', key, consent, previousSessionId), 'API login');
+    let rawSession = await gas('scAuthLogin', 'TORN_API_KEY', key, consent, previousSessionId);
+    if (!rawSession) rawSession = await gas('scAuthLoginLean', 'TORN_API_KEY', key, consent, '');
+    const session = validateLoginSession_(rawSession, 'API login');
     const baseUser = scNormalizeUser_(session);
     const sessionObj = Object.assign(baseUser, {
       sessionId: session.sessionId,
@@ -342,7 +344,9 @@ async function leaderLogin() {
   try {
     const token = document.getElementById('leaderTokenInput').value;
     const previousSessionId = state.sessionId || getStoredSessionId_();
-    const session = validateLoginSession_(await gas('scAuthLogin', 'ADMIN_TOKEN', token, {}, previousSessionId), 'Leader token login');
+    let rawSession = await gas('scAuthLogin', 'ADMIN_TOKEN', token, {}, previousSessionId);
+    if (!rawSession) rawSession = await gas('scAuthLoginLean', 'ADMIN_TOKEN', token, {}, '');
+    const session = validateLoginSession_(rawSession, 'Leader token login');
     replaceActiveSession_(session.sessionId, {
       sessionId: session.sessionId,
       tornId: 'LEADER',
@@ -362,7 +366,9 @@ async function memberTokenLogin() {
   try {
     const token = document.getElementById('memberTokenInput').value;
     const previousSessionId = state.sessionId || getStoredSessionId_();
-    const session = validateLoginSession_(await gas('scAuthLogin', 'MEMBER_TOKEN', token, {}, previousSessionId), 'Member token login');
+    let rawSession = await gas('scAuthLogin', 'MEMBER_TOKEN', token, {}, previousSessionId);
+    if (!rawSession) rawSession = await gas('scAuthLoginLean', 'MEMBER_TOKEN', token, {}, '');
+    const session = validateLoginSession_(rawSession, 'Member token login');
     const baseUser = scNormalizeUser_(session);
     replaceActiveSession_(session.sessionId, Object.assign(baseUser, {
       sessionId: session.sessionId,

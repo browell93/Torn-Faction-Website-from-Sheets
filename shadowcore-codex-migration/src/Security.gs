@@ -1081,6 +1081,37 @@ function scAuthClearLastError_() {
   try { getScriptProps_().deleteProperty('AUTH_LAST_ERROR'); } catch (e) {}
 }
 
+function scAuthSerializable_(obj) {
+  // google.script.run can return null if a payload contains Apps Script host
+  // objects, Dates, or other non-plain values. Force every auth response through
+  // JSON so login never succeeds server-side but arrives in the browser as null.
+  return JSON.parse(safeJson_(obj || {}));
+}
+
+function scAuthSummarizeAutoSync_(autoMemberApiSync) {
+  if (!autoMemberApiSync) return null;
+  return {
+    ok: autoMemberApiSync.ok === true,
+    tornId: String(autoMemberApiSync.tornId || ''),
+    name: String(autoMemberApiSync.name || ''),
+    error: String(autoMemberApiSync.error || ''),
+    warning: String(autoMemberApiSync.warning || ''),
+    status: String(autoMemberApiSync.status || autoMemberApiSync.Last_Status || '')
+  };
+}
+
+function scAuthSummarizeApiVerify_(apiVerify) {
+  if (!apiVerify) return null;
+  var warnings = apiVerify.warnings || [];
+  if (!Array.isArray(warnings)) warnings = [String(warnings || '')];
+  return {
+    ok: apiVerify.ok === true,
+    method: String(apiVerify.method || ''),
+    warningCount: warnings.length,
+    warnings: warnings.slice(0, 5).map(function(w) { return String(w || '').slice(0, 250); })
+  };
+}
+
 function scAuthSessionResponse_(session, source, extra) {
   if (!session || !session.sessionId) throw new Error((source || 'Login') + ' failed internally: no sessionId was created.');
   var user = session.user || session;
@@ -1105,12 +1136,13 @@ function scAuthSessionResponse_(session, source, extra) {
     authSource: authSource,
     source: source || authSource,
     lastAuthError: scAuthGetLastError_(),
-    version: '2.6.20'
+    version: '2.6.21'
   };
   if (extra) {
-    Object.keys(extra).forEach(function(k) { out[k] = extra[k]; });
+    if (extra.autoMemberApiSync !== undefined) out.autoMemberApiSync = scAuthSummarizeAutoSync_(extra.autoMemberApiSync);
+    if (extra.apiVerify !== undefined) out.apiVerify = scAuthSummarizeApiVerify_(extra.apiVerify);
   }
-  return out;
+  return scAuthSerializable_(out);
 }
 
 function scAuthCreateAdminSession_(token) {
@@ -1223,6 +1255,44 @@ function scAuthLogin(mode, credential, consent, previousSessionId) {
   }
 }
 
+function scAuthLoginLean(mode, credential, consent, previousSessionId) {
+  // Emergency-compatible login endpoint used only if google.script.run receives
+  // a null payload from scAuthLogin. It returns the smallest possible plain
+  // object while still using the same canonical auth/session creation path.
+  mode = String(mode || '').toUpperCase();
+  try {
+    if (previousSessionId) logout(previousSessionId);
+    var session;
+    if (mode === 'ADMIN_TOKEN') session = scAuthCreateAdminSession_(credential);
+    else if (mode === 'TORN_API_KEY') session = scAuthCreateApiSession_(credential, consent || {});
+    else if (mode === 'MEMBER_TOKEN') session = scAuthCreateMemberTokenSession_(credential);
+    else throw new Error('Unsupported auth mode: ' + mode + '.');
+    scAuthClearLastError_();
+    var user = session.user || {};
+    return scAuthSerializable_({
+      ok:true,
+      sessionId:String(session.sessionId || ''),
+      user:{
+        sessionId:String(session.sessionId || ''),
+        tornId:String(user.tornId || ''),
+        name:String(user.name || ''),
+        role:String(user.role || ''),
+        roleValue:Number(user.roleValue || 0),
+        authSource:String(user.authSource || mode),
+        lastLogin:String(user.lastLogin || user.created || nowIso_()),
+        adminToken:!!user.adminToken,
+        apiLogin:!!user.apiLogin,
+        memberTokenLogin:!!user.memberTokenLogin
+      },
+      authSource:String(user.authSource || mode),
+      version:'2.6.21-lean'
+    });
+  } catch (err) {
+    scAuthSetLastError_(mode + ': ' + String(err && err.message || err));
+    throw err;
+  }
+}
+
 function validateAuthSession_(sessionId) {
   var session = getSession_(sessionId);
   if (!session) return {ok:false, error:'No valid session found for that sessionId.', session:null, lastAuthError:scAuthGetLastError_()};
@@ -1270,6 +1340,6 @@ function getAuthDebugState(sessionId, page) {
     permission:permission,
     lastAuthError:validated.lastAuthError,
     checkedAt:nowIso_(),
-    version:'2.6.20'
+    version:'2.6.21'
   };
 }
