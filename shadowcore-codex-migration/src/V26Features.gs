@@ -109,6 +109,53 @@ function v26AddCommonMemberData_(data, session, page) {
   }
 }
 
+function v26DashboardWithSessionFallback_(summary, session, status, identity) {
+  summary = summary && typeof summary === 'object' ? Object.assign({}, summary) : {};
+  session = (typeof v2612NormalizeSession_ === 'function') ? v2612NormalizeSession_(session || {}) : (session || {});
+  status = status || {};
+  identity = identity || {};
+
+  // Build a member-visible fallback from the same status rows shown on the
+  // dashboard. This lets every authenticated member see useful aggregate
+  // counts even before a leader/manual faction-basic sync has populated the
+  // Members sheet.
+  var statusRows = [];
+  try {
+    statusRows = (typeof v22MergedMemberStatuses_ === 'function') ? v22MergedMemberStatuses_() : v26Read_(APP.SHEETS.MEMBER_STATUS, 9999);
+  } catch (e) {
+    statusRows = v26Read_(APP.SHEETS.MEMBER_STATUS, 9999);
+  }
+  statusRows = v26RowsWithSessionStatus_(statusRows, session, status);
+
+  var seen = {};
+  var counts = {available:0, hospitalized:0, jailed:0, traveling:0};
+  statusRows.forEach(function(row) {
+    row = row || {};
+    var id = String(row.Torn_ID || row.Player_ID || row.User_ID || row.ID || '').trim();
+    if (id) seen[id] = true;
+    var text = String(row.Status || row.State || '').toLowerCase();
+    var jail = String(row.Jail || '').toUpperCase() === 'TRUE' || text.indexOf('jail') !== -1;
+    var travel = String(row.Travel || '').toUpperCase() === 'TRUE' || text.indexOf('travel') !== -1 || text.indexOf('abroad') !== -1;
+    var hospital = text.indexOf('hospital') !== -1 || !!row.Hospital_Until;
+    if (hospital) counts.hospitalized++;
+    else if (jail) counts.jailed++;
+    else if (travel) counts.traveling++;
+    else if (text.indexOf('okay') !== -1 || text === 'ok' || text === 'api login verified' || !text) counts.available++;
+  });
+
+  var sessionId = String((identity && identity.Torn_ID) || (status && status.Torn_ID) || session.tornId || '').trim();
+  if (sessionId) seen[sessionId] = true;
+  var fallbackMembers = Object.keys(seen).length;
+
+  if (!Number(summary.members || 0) && fallbackMembers) summary.members = fallbackMembers;
+  if (!Number(summary.available || 0) && counts.available) summary.available = counts.available;
+  if (!Number(summary.hospitalized || 0) && counts.hospitalized) summary.hospitalized = counts.hospitalized;
+  if (!Number(summary.jailed || 0) && counts.jailed) summary.jailed = counts.jailed;
+  if (!Number(summary.traveling || 0) && counts.traveling) summary.traveling = counts.traveling;
+  if (fallbackMembers) summary.dataSource = Number(summary.members || 0) === fallbackMembers ? 'member_status_fallback' : (summary.dataSource || 'faction_sync');
+  return summary;
+}
+
 function v26RowsWithSessionStatus_(rows, session, status) {
   rows = Array.isArray(rows) ? rows.slice() : [];
   status = status || {};

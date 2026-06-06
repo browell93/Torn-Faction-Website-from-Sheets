@@ -599,13 +599,41 @@ function dashboardHasData_(obj) {
 }
 
 function dashboardSummaryForRender_() {
-  return Object.assign({}, (state.data || {}).dashboard || {});
+  const d = state.data || {};
+  const summary = Object.assign({}, d.dashboard || {});
+  const rows = dashboardMemberStatusesForRender_();
+  const seen = {};
+  const counts = {available:0, hospitalized:0, jailed:0, traveling:0};
+  rows.forEach(row => {
+    row = row || {};
+    const id = String(row.Torn_ID || row.Player_ID || row.User_ID || row.ID || '').trim();
+    if (id) seen[id] = true;
+    const text = String(row.Status || row.State || '').toLowerCase();
+    const jail = String(row.Jail || '').toUpperCase() === 'TRUE' || text.includes('jail');
+    const travel = String(row.Travel || '').toUpperCase() === 'TRUE' || text.includes('travel') || text.includes('abroad');
+    const hospital = text.includes('hospital') || !!row.Hospital_Until;
+    if (hospital) counts.hospitalized += 1;
+    else if (jail) counts.jailed += 1;
+    else if (travel) counts.traveling += 1;
+    else if (text.includes('okay') || text === 'ok' || text === 'api login verified' || !text) counts.available += 1;
+  });
+  const identity = currentIdentity_();
+  if (identity.Torn_ID) seen[String(identity.Torn_ID)] = true;
+  const fallbackMembers = Object.keys(seen).length;
+  if (!Number(summary.members || 0) && fallbackMembers) summary.members = fallbackMembers;
+  if (!Number(summary.available || 0) && counts.available) summary.available = counts.available;
+  if (!Number(summary.hospitalized || 0) && counts.hospitalized) summary.hospitalized = counts.hospitalized;
+  if (!Number(summary.jailed || 0) && counts.jailed) summary.jailed = counts.jailed;
+  if (!Number(summary.traveling || 0) && counts.traveling) summary.traveling = counts.traveling;
+  if (fallbackMembers && !summary.dataSource) summary.dataSource = 'member_status_fallback';
+  return summary;
 }
 
 function dashboardDataNotice_(summary) {
   const identity = currentIdentity_();
-  if (Number(summary.members || 0) || !identity.Torn_ID) return '';
-  return '<div class="warnbox">Faction aggregate data has not synced yet. Reconnect with a key that includes faction basic access or have leadership run a full sync; personal API status below may still be current.</div>';
+  const rows = dashboardMemberStatusesForRender_();
+  if (Number(summary.members || 0) || rows.length || !identity.Torn_ID) return '';
+  return '<div class="warnbox">No faction or member status rows are available yet. Reconnect with a key that includes faction basic access, enable member API auto-sync, or have leadership run a full sync.</div>';
 }
 
 function dashboardMemberStatusesForRender_() {
