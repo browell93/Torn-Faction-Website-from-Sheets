@@ -1030,24 +1030,10 @@ function testSc2618LeaderLogin(token) {
 
 /**
  * ShadowCore HQ v2.6.19 - Auth Mode Isolation Fix
- * API login must replace admin/leader login, not fall back to it.
+ *
+ * The public sc2619 wrappers are defined once in the canonical auth section
+ * below so older deployments cannot accidentally bypass auth-mode isolation.
  */
-function sc2619LeaderLogin(token) {
-  return sc2618LeaderLogin(token);
-}
-
-function sc2619ConnectApiKey(key, consent) {
-  // Uses the repaired v2.6.18 API verifier, but exposed under a unique endpoint
-  // so the client cannot accidentally call older duplicated login paths.
-  var session = sc2618ConnectApiKey(key, consent);
-  session.authMode = 'API';
-  if (session.user) {
-    session.user.authMode = 'API';
-    session.user.adminToken = false;
-    session.user.apiLogin = true;
-  }
-  return session;
-}
 
 function debugSc2619AuthConfig() {
   var out = debugSc2618AuthConfig ? debugSc2618AuthConfig() : {};
