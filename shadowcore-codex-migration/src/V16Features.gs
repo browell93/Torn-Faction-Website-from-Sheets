@@ -189,18 +189,6 @@ function issueMemberTokenFromWeb(sessionId, form) {
   return {ok:true, token:token, fingerprint:row.Token_Fingerprint, expires:expires};
 }
 
-function memberTokenLoginLegacy_(token) {
-  var fp = fingerprint_(String(token || ''));
-  var raw = getScriptProps_().getProperty('MEMBER_TOKEN_' + fp);
-  if (!raw) throw new Error('Invalid member token.');
-  var data = JSON.parse(raw);
-  if (new Date(data.expires).getTime() < Date.now()) throw new Error('Expired member token.');
-  var rows = readTable_(APP.SHEETS.MEMBER_TOKENS), row = null;
-  rows.forEach(function(r) { if (String(r.Token_Fingerprint) === fp) row = r; });
-  if (row && String(row.Status).toLowerCase() !== 'active') throw new Error('Token is not active.');
-  if (row) { row.Last_Used = nowIso_(); upsertRowByKey_(APP.SHEETS.MEMBER_TOKENS, 'Token_ID', row.Token_ID, row); }
-  return createSession_({tornId:data.tornId, name:data.name || ('Player ' + data.tornId), role:data.role || 'MEMBER', email:''});
-}
 
 function revokeMemberTokenFromWeb(sessionId, tokenId) {
   var session = requireRole_(sessionId, 'OFFICER');

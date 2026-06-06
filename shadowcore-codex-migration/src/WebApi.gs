@@ -2,13 +2,14 @@
  * ShadowCore HQ - Functions called by the web frontend.
  */
 
-function getPublicState() {
+function getPublicState(read) {
+  read = read || readTable_;
   return {
     app: {name: factionName_() + ' HQ', version: APP.VERSION, factionId: factionId_()},
-    announcements: activeRows_(readTable_(APP.SHEETS.ANNOUNCEMENTS)).slice(-5),
-    rules: activeRows_(readTable_(APP.SHEETS.RULES)),
-    knowledgeBasePublic: activeRows_(readTable_(APP.SHEETS.KNOWLEDGE_BASE)).filter(function(a) { return /public|all/i.test(String(a.Audience || 'All')); }).slice(-50),
-    recruitMicrosite: activeRows_(readTable_(APP.SHEETS.RECRUIT_MICROSITE)).sort(numericSort_('Sort')),
+    announcements: activeRows_(read(APP.SHEETS.ANNOUNCEMENTS)).slice(-5),
+    rules: activeRows_(read(APP.SHEETS.RULES)),
+    knowledgeBasePublic: activeRows_(read(APP.SHEETS.KNOWLEDGE_BASE)).filter(function(a) { return /public|all/i.test(String(a.Audience || 'All')); }).slice(-50),
+    recruitMicrosite: activeRows_(read(APP.SHEETS.RECRUIT_MICROSITE)).sort(numericSort_('Sort')),
     apiDisclosure: setting_('Required_Key_Disclosure', requiredCustomSelectionsText_()),
     privacyDisclosure: (typeof privacyDisclosureText_ === 'function') ? privacyDisclosureText_() : '',
     theme: {mode: setting_('Theme_Mode','Anthracite'), accent: setting_('Theme_Accent','#f59e0b'), background: setting_('Theme_Background','#05070a'), customDomain: setting_('Public_Custom_Domain','')},
@@ -46,12 +47,11 @@ function numericSort_(field) {
 
 function getAppState(sessionId) {
   var session = getSession_(sessionId);
-  var publicState = getPublicState();
+  var read = buildTableReader_();
+  var publicState = getPublicState(read);
   if (!session) {
     return {public: publicState, session: null};
   }
-
-  var read = buildTableReader_();
   var role = Number(session.roleValue || 0);
   var tornId = String(session.tornId || '');
   var payouts = read(APP.SHEETS.PAYOUTS);
