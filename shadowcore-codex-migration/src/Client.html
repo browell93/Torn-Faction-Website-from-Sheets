@@ -324,7 +324,8 @@ async function connectKey() {
       sessionId: session.sessionId,
       apiLogin: true,
       adminToken: false,
-      authMode: 'API'
+      authSource: (session.user && session.user.authSource) || session.authSource || 'TORN_API_KEY',
+      authMode: 'TORN_API_KEY'
     });
     replaceActiveSession_(session.sessionId, sessionObj);
     try { document.getElementById('apiKeyInput').value = ''; } catch (e) {}
@@ -358,7 +359,8 @@ async function leaderLogin() {
       roleValue: (session.user && session.user.roleValue) || 5,
       adminToken: true,
       apiLogin: false,
-      authMode: 'ADMIN'
+      authSource: (session.user && session.user.authSource) || session.authSource || 'ADMIN_TOKEN',
+      authMode: 'ADMIN_TOKEN'
     });
     toast('Leader login successful.');
     await loadState();
@@ -378,6 +380,7 @@ async function memberTokenLogin() {
       memberTokenLogin: true,
       adminToken: false,
       apiLogin: false,
+      authSource: (session.user && session.user.authSource) || session.authSource || 'MEMBER_TOKEN',
       authMode: 'MEMBER_TOKEN'
     }));
     toast('Token login successful.');
@@ -534,6 +537,17 @@ function hasDisplayData_(obj) {
 function firstDataObject_(...objs) {
   return objs.find(hasDisplayData_) || {};
 }
+function normalizeAuthSource_(session) {
+  session = session || {};
+  const raw = String(session.authSource || session.authMode || '').toUpperCase();
+  if (raw === 'API') return 'TORN_API_KEY';
+  if (raw === 'ADMIN') return 'ADMIN_TOKEN';
+  if (raw) return raw;
+  if (session.apiLogin) return 'TORN_API_KEY';
+  if (session.adminToken) return 'ADMIN_TOKEN';
+  if (session.memberTokenLogin) return 'MEMBER_TOKEN';
+  return 'Session';
+}
 function currentIdentity_() {
   const d = state.data || {};
   const session = activeSession_() || d.session || {};
@@ -544,9 +558,23 @@ function currentIdentity_() {
     Torn_ID: raw.Torn_ID || raw.tornId || raw.id || session.tornId || '',
     Name: raw.Name || raw.name || session.name || '',
     Role: raw.Role || raw.role || session.role || '',
-    Session_Source: session.authSource || session.authMode || (session.apiLogin ? 'TORN_API_KEY' : (session.adminToken ? 'ADMIN_TOKEN' : (session.memberTokenLogin ? 'MEMBER_TOKEN' : 'Session'))),
+    Session_Source: normalizeAuthSource_(session),
     Last_Login: session.lastLogin || session.created || ''
   };
+}
+function renderDashboardProfile_() {
+  const d = state.data || {};
+  const identity = currentIdentity_();
+  const status = firstDataObject_(d.myStatus, d.v2612MyData && d.v2612MyData.status);
+  const scorecard = firstDataObject_(d.myScorecard, d.v2612MyData && d.v2612MyData.scorecard);
+  const statusLine = status.Status || status.Last_Action || status.Updated ? `<p class="muted"><b>Status:</b> ${esc(status.Status || 'Unknown')}${status.Updated ? ' · Updated ' + esc(formatCell(status.Updated, 'Updated')) : ''}</p>` : '<p class="muted">No live status rows yet. My Faction Life will still show your verified API identity.</p>';
+  const scoreLine = scorecard.Grade || scorecard.Faction_Value || scorecard.Activity_Score ? `<p class="muted"><b>Scorecard:</b> ${esc(scorecard.Grade || scorecard.Faction_Value || scorecard.Activity_Score)}</p>` : '';
+  return `<div class="profile-summary">
+    <p><b>${esc(identity.Name || 'Logged in member')}</b>${identity.Torn_ID ? ` <span class="pill">${esc(identity.Torn_ID)}</span>` : ''}</p>
+    <p class="muted">${esc(identity.Role || 'MEMBER')} · ${esc(identity.Session_Source || 'Session')}</p>
+    ${statusLine}${scoreLine}
+    <div class="actions"><button class="secondary" onclick="showPage('mylife',true)">Open My Faction Life</button><button class="secondary" onclick="loadPageDataV26('dashboard')">Reload profile</button></div>
+  </div>`;
 }
 
 function renderDashboard() {
@@ -571,7 +599,7 @@ function renderDashboard() {
     </div>
     <div class="grid two">
       <div class="card"><h3>Upcoming events</h3>${table(events, ['Title','Type','Start_Time','Status','Description'])}</div>
-      <div class="card"><h3>My profile</h3>${renderObject(currentIdentity_())}${renderObject(firstDataObject_(d.myStatus, d.v2612MyData && d.v2612MyData.status))}${renderObject(firstDataObject_(d.myScorecard, d.v2612MyData && d.v2612MyData.scorecard))}</div>
+      <div class="card"><h3>My profile</h3>${renderDashboardProfile_()}</div>
     </div>
     <div class="card"><h3>Member live status / API fields</h3><p class="muted">Energy, nerve, happy, life, cooldowns, and hospital data fill from member API/scanner readiness snapshots when members opt in.</p>${table((d.memberStatuses || (v22().memberStatusesMerged||[])).slice().reverse(), ['Name','Status','Last_Action','Life','Energy','Nerve','Happy','Hospital_Until','Jail','Travel','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}</div>`;
 }
@@ -894,7 +922,7 @@ function renderV13MyLife() {
     Name: (life.member && life.member.Name) || (direct.identity && direct.identity.Name) || currentIdentity_().Name,
     Role: (life.member && life.member.Role) || (direct.identity && direct.identity.Role) || currentIdentity_().Role,
     Session_Source: currentIdentity_().Session_Source,
-    Session_Type: session.authSource || session.authMode || '',
+    Session_Type: normalizeAuthSource_(session),
     Last_Login: currentIdentity_().Last_Login
   });
   const status = firstDataObject_(life.status, d.myStatus, direct.status);
