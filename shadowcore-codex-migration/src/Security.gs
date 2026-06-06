@@ -1030,24 +1030,10 @@ function testSc2618LeaderLogin(token) {
 
 /**
  * ShadowCore HQ v2.6.19 - Auth Mode Isolation Fix
- * API login must replace admin/leader login, not fall back to it.
+ *
+ * The public sc2619 wrappers are defined once in the canonical auth section
+ * below so older deployments cannot accidentally bypass auth-mode isolation.
  */
-function sc2619LeaderLogin(token) {
-  return sc2618LeaderLogin(token);
-}
-
-function sc2619ConnectApiKey(key, consent) {
-  // Uses the repaired v2.6.18 API verifier, but exposed under a unique endpoint
-  // so the client cannot accidentally call older duplicated login paths.
-  var session = sc2618ConnectApiKey(key, consent);
-  session.authMode = 'API';
-  if (session.user) {
-    session.user.authMode = 'API';
-    session.user.adminToken = false;
-    session.user.apiLogin = true;
-  }
-  return session;
-}
 
 function debugSc2619AuthConfig() {
   var out = debugSc2618AuthConfig ? debugSc2618AuthConfig() : {};
@@ -1179,6 +1165,77 @@ function scAuthRecordApiKeyHealth_(tornId, name, stored, status, warning) {
   } catch (e) {}
 }
 
+function scAuthHydrateFactionMembersFromLoginKey_(key) {
+  // Use the submitted login key once, without storing it, to populate real
+  // faction dashboard data when the key includes faction basic access. This is
+  // intentionally best-effort: login should still succeed for member-only keys.
+  try {
+    var data = tornRequest_('faction', factionId_(), 'basic', key, {}, {bypassLocalCache:true});
+    var membersObj = data.members || (data.faction && data.faction.members) || {};
+    var ids = Object.keys(membersObj);
+    if (!ids.length) return {ok:false, members:0, warning:'Faction basic returned no member list for this key.'};
+
+    var timestamp = nowIso_();
+    ids.forEach(function(id) {
+      var m = membersObj[id] || {};
+      var tornId = String(id || m.id || m.user_id || m.player_id || '');
+      if (!tornId) return;
+      var name = m.name || m.player_name || '';
+      var statusText = '';
+      if (m.status) statusText = typeof m.status === 'string' ? m.status : (m.status.description || m.status.state || m.status.status || '');
+      var lastAction = '';
+      if (m.last_action) lastAction = typeof m.last_action === 'string' ? m.last_action : (m.last_action.relative || m.last_action.timestamp || '');
+
+      upsertRowByKey_(APP.SHEETS.MEMBERS, 'Torn_ID', tornId, {
+        Torn_ID:tornId,
+        Name:name,
+        Role:findMemberRole_(tornId) || 'MEMBER',
+        Rank:m.position || m.rank || '',
+        Joined:m.joined || '',
+        Discord:'',
+        Active:'TRUE',
+        Last_Seen:lastAction || timestamp,
+        Faction_ID:factionId_(),
+        Profile_URL:'https://www.torn.com/profiles.php?XID=' + tornId,
+        Notes:''
+      });
+
+      upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', tornId, {
+        Torn_ID:tornId,
+        Name:name,
+        Status:statusText || 'Unknown',
+        Last_Action:lastAction,
+        Life:valueOrBlank_(m.life),
+        Energy:valueOrBlank_(m.energy),
+        Nerve:valueOrBlank_(m.nerve),
+        Happy:valueOrBlank_(m.happy),
+        Hospital_Until:m.status && m.status.until ? m.status.until : '',
+        Jail:/jail/i.test(statusText) ? 'TRUE' : 'FALSE',
+        Travel:/travel|abroad/i.test(statusText) ? 'TRUE' : 'FALSE',
+        Drug_Cooldown:'',
+        Medical_Cooldown:'',
+        Booster_Cooldown:'',
+        Updated:timestamp
+      });
+    });
+
+    upsertRowByKey_(APP.SHEETS.FACTION_STATUS, 'Timestamp', timestamp, {
+      Timestamp:timestamp,
+      Faction_ID:factionId_(),
+      Name:data.name || factionName_(),
+      Members:ids.length || data.members_count || '',
+      Respect:data.respect || '',
+      Chain:data.chain || '',
+      Rank:data.rank || '',
+      War_Status:(typeof activeWar_ === 'function' && activeWar_()) ? 'Active/Tracked' : '',
+      Notes:'Synced one time from API login faction basic selection.'
+    });
+    return {ok:true, members:ids.length, source:'api_login_faction_basic', syncedAt:timestamp};
+  } catch (err) {
+    return {ok:false, members:0, warning:String(err && err.message || err)};
+  }
+}
+
 function scAuthHydrateApiLoginData_(key, tornId, name, stored, verifiedProfile) {
   // Use the just-submitted key once, in memory, to populate the member-facing
   // sheets that My Faction Life reads. This does not store the API key unless
@@ -1293,7 +1350,9 @@ function scAuthCreateApiSession_(key, consent) {
     autoSyncResult = {ok:false, warning:'Auto-sync consent was given, but Store_Member_Keys is disabled in Settings.'};
   }
 
+  var oneTimeFactionSync = scAuthHydrateFactionMembersFromLoginKey_(key);
   var oneTimeDataSync = scAuthHydrateApiLoginData_(key, tornId, name, storeKeys, profile);
+  oneTimeDataSync.factionSync = oneTimeFactionSync;
   var session = createSession_({
     tornId:tornId, name:name, role:role, authSource:'TORN_API_KEY', apiLogin:true, adminToken:false,
     authBridge:{identity:oneTimeDataSync.identity || null, status:oneTimeDataSync.statusRow || null, apiHealth:oneTimeDataSync.apiHealth || null, oneTimeDataSync:oneTimeDataSync}
@@ -1301,6 +1360,7 @@ function scAuthCreateApiSession_(key, consent) {
   session.autoMemberApiSync = autoSyncResult;
   session.apiVerify = {ok:true, method:verified.method, warnings:verified.warnings || []};
   session.oneTimeDataSync = oneTimeDataSync;
+  session.oneTimeFactionSync = oneTimeFactionSync;
   logAudit_(name, 'scAuthLogin.TORN_API_KEY', 'Verified key fingerprint ' + fp + ', method=' + verified.method + ', stored=' + storeKeys + ', autoSync=' + safeJson_(autoSyncResult || {}).slice(0, 500) + ', oneTimeData=' + safeJson_(session.oneTimeDataSync || {}).slice(0, 500));
   return session;
 }

@@ -104,8 +104,26 @@ function v26AddCommonMemberData_(data, session, page) {
     data.events = v26Read_(APP.SHEETS.EVENTS, 5);
     data.v22 = (typeof getV22State_ === 'function') ? v26SafeCall_(function(){ return getV22State_(session); }, {}) : {};
     data.memberStatuses = (typeof v22MergedMemberStatuses_ === 'function') ? v26SafeCall_(function(){ return v22MergedMemberStatuses_().slice(-150); }, []) : v26Read_(APP.SHEETS.MEMBER_STATUS, 150);
+    data.memberStatuses = v26RowsWithSessionStatus_(data.memberStatuses, session, data.myStatus);
   }
 }
+
+function v26RowsWithSessionStatus_(rows, session, status) {
+  rows = Array.isArray(rows) ? rows.slice() : [];
+  status = status || {};
+  session = session || {};
+  if (!status || Object.keys(status).length === 0) return rows;
+  var tornId = String(status.Torn_ID || session.tornId || '');
+  if (!tornId) return rows;
+  var found = rows.some(function(row) { return String(row.Torn_ID || row.Player_ID || row.User_ID || '') === tornId; });
+  if (!found) {
+    var row = Object.assign({Torn_ID:tornId, Name:session.name || '', Source:'session auth bridge'}, status);
+    if (!row.Name) row.Name = session.name || '';
+    rows.push(row);
+  }
+  return rows;
+}
+
 
 function v26AddPageData_(data, session, role, page) {
   var L = Number(setting_('Performance_Row_Limit_Default','150')) || 150;
