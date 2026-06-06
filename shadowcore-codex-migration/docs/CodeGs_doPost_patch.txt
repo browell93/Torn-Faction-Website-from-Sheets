@@ -1,0 +1,17 @@
+PATCH YOUR Code.gs doPost(e)
+===========================
+
+Find this section in Code.gs:
+
+    if (action === 'publicState') result = getPublicState();
+    else if (action === 'submitApplication') result = submitApplication(body.form || {});
+    else throw new Error('Unsupported action: ' + action);
+
+Replace it with this:
+
+    if (action === 'publicState') result = getPublicState();
+    else if (action === 'submitApplication') result = submitApplication(body.form || {});
+    else if (String(action || '').indexOf('scanner') === 0) result = scannerHandle_(body);
+    else throw new Error('Unsupported action: ' + action);
+
+Then save, run setupShadowCoreScannerBridge(), and redeploy the web app as a new version.

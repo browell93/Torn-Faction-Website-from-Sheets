@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title><?= appName ?></title>
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="mark">SC</div>
+        <div>
+          <h1>ShadowCore HQ</h1>
+          <small>Faction Operating System v<?= version ?></small>
+        </div>
+      </div>
+      <button data-page="dashboard" class="nav active">Dashboard</button>
+      <button data-page="war" class="nav">War Room</button>
+      <button data-page="battleplan" class="nav">Battle Plan</button>
+      <button data-page="commitments" class="nav">War Contracts</button>
+      <button data-page="strike" class="nav">Strike Teams</button>
+      <button data-page="chain" class="nav">Chain Tracker</button>
+      <button data-page="targets" class="nav">Target Board</button>
+      <button data-page="payouts" class="nav">Payout Center</button>
+      <button data-page="requests" class="nav">Armory Requests</button>
+      <button data-page="recruiting" class="nav">Recruiting</button>
+      <button data-page="vetting" class="nav">Applicant Vetting</button>
+      <button data-page="training" class="nav">Training</button>
+      <button data-page="scorecards" class="nav">Scorecards</button>
+      <button data-page="oc" class="nav">OC Planner</button>
+      <button data-page="enemy" class="nav">Enemy Intel</button>
+      <button data-page="chainplan" class="nav">Chain Planner</button>
+      <button data-page="economy" class="nav">Economy Ledger</button>
+      <button data-page="discipline" class="nav">Discipline</button>
+      <button data-page="tasks" class="nav">Officer Tasks</button>
+      <button data-page="rulescheck" class="nav">Rule Checks</button>
+      <button data-page="bbcode" class="nav">HTML Code Editor</button>
+      <button data-page="selfservice" class="nav">Self-Service</button>
+      <button data-page="mobile" class="nav">Mobile War</button>
+      <button data-page="treasury" class="nav">Treasury</button>
+      <button data-page="loans" class="nav">Loans</button>
+      <button data-page="revives" class="nav">Revive Support</button>
+      <button data-page="availabilitycal" class="nav">Availability Calendar</button>
+      <button data-page="promotions" class="nav">Promotions</button>
+      <button data-page="awards" class="nav">Awards</button>
+      <button data-page="onboarding" class="nav">Onboarding</button>
+      <button data-page="mentors" class="nav">Mentors</button>
+      <button data-page="knowledge" class="nav">Knowledge Base</button>
+      <button data-page="keyhealth" class="nav">Key Health</button>
+      <button data-page="polls" class="nav">Polls</button>
+      <button data-page="mylife" class="nav">My Faction Life</button>
+      <button data-page="layout" class="nav">My Layout</button>
+      <button data-page="advisor" class="nav">Advisor Center</button>
+      <button data-page="myadvisor" class="nav">My Advisor</button>
+      <button data-page="membereducation" class="nav">Member Education</button>
+      <button data-page="weeklyreport" class="nav">Weekly Reports</button>
+      <button data-page="coachingqueue" class="nav">Coaching Queue</button>
+      <button data-page="factionneeds" class="nav">Faction Needs</button>
+      <button data-page="microsite" class="nav">Recruit Microsite</button>
+      <button data-page="setup" class="nav">Setup Wizard</button>
+      <button data-page="privacy" class="nav">Privacy / API</button>
+      <button data-page="updates" class="nav">Version / Updates</button>
+      <button data-page="backups" class="nav">Backups</button>
+      <button data-page="diagnostics" class="nav">Diagnostics</button>
+      <button data-page="scannerinstall" class="nav">Scanner Install</button>
+      <button data-page="gymgains" class="nav">Gym Gains Lab</button>
+      <button data-page="GymGainComparison" class="nav">Gym Comparison</button>
+      <button data-page="GymGainProjectionView" class="nav">Gym Projection</button>
+      <button data-page="GymGoalEstimatorView" class="nav">Goal Estimator</button>
+      <button data-page="warcountdown" class="nav">105h Enemy Watch</button>
+      <button data-page="MemberActivityTable" class="nav">Member Activity Table</button>
+      <button data-page="ActivityHeatmap" class="nav">Activity Heatmap</button>
+      <button data-page="WarReadinessReportView" class="nav">Readiness Report</button>
+      <button data-page="scannerdeep" class="nav">Scanner Deep Data</button>
+      <button data-page="visuals" class="nav">Graphs / Visuals</button>
+      <button data-page="scanneroptin" class="nav">Scanner Opt-In</button>
+      <button data-page="recommendations" class="nav">Smart Recs</button>
+      <button data-page="taborganizer" class="nav">Tab Organizer</button>
+      <button data-page="tokens" class="nav">Member Tokens</button>
+      <button data-page="commands" class="nav">Discord Commands</button>
+      <button data-page="protection" class="nav">Sheet Protection</button>
+      <button data-page="safemode" class="nav">Safe Mode</button>
+      <button data-page="manual" class="nav">Admin Manual</button>
+      <button data-page="theme" class="nav">Theme</button>
+      <button data-page="comms" class="nav">Comms & Reports</button>
+      <button data-page="settings" class="nav">Settings</button>
+      <button data-page="permissions" class="nav">Page Permissions</button>
+      <button data-page="admin" class="nav">Admin</button>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h2 id="pageTitle">Dashboard</h2>
+          <p id="subtitle">Live faction command center powered by Google Sheets + Apps Script.</p>
+        </div>
+        <div class="login">
+          <span id="sessionBadge" class="badge">Not logged in</span>
+          <button id="refreshBtn">Refresh</button>
+        </div>
+      </header>
+
+      <section id="loginPanel" class="card">
+        <h3>Connect member API key or leader token</h3>
+        <p class="muted">This app uses Torn API keys only. Never enter your Torn password. Keys are used for the disclosure shown below and can be removed by the member.</p>
+        <pre id="apiDisclosure" class="disclosure">Loading disclosure...</pre>
+        <div class="grid two">
+          <div>
+            <label>Torn API key</label>
+            <input id="apiKeyInput" placeholder="Paste Torn API key">
+            <label>Discord name</label>
+            <input id="discordInput" placeholder="Optional">
+            <label>Selections / access level you granted</label>
+            <input id="selectionsInput" placeholder="Example: key info,user profile,status,attacks">
+            <label class="check"><input type="checkbox" id="consentInput"> I understand and accept the API disclosure.</label>
+            <button id="connectBtn">Connect Key</button>
+          </div>
+          <div>
+            <label>Leader token</label>
+            <input id="leaderTokenInput" placeholder="Admin_Token from Settings sheet">
+            <button id="leaderLoginBtn">Leader Login</button>
+            <hr>
+            <label>Member / officer token</label>
+            <input id="memberTokenInput" placeholder="Token issued by leadership">
+            <button id="memberTokenLoginBtn" type="button">Token Login</button>
+            <p class="muted">Use Admin_Emails in Settings for better access control where possible.</p>
+          </div>
+        </div>
+      </section>
+
+      <div id="toast" class="toast hidden"></div>
+
+      <section id="dashboard" class="page active"></section>
+      <section id="war" class="page"></section>
+      <section id="chain" class="page"></section>
+      <section id="targets" class="page"></section>
+      <section id="payouts" class="page"></section>
+      <section id="requests" class="page"></section>
+      <section id="recruiting" class="page"></section>
+      <section id="scorecards" class="page"></section>
+      <section id="oc" class="page"></section>
+      <section id="enemy" class="page"></section>
+      <section id="battleplan" class="page"></section>
+      <section id="commitments" class="page"></section>
+      <section id="strike" class="page"></section>
+      <section id="vetting" class="page"></section>
+      <section id="training" class="page"></section>
+      <section id="chainplan" class="page"></section>
+      <section id="economy" class="page"></section>
+      <section id="discipline" class="page"></section>
+      <section id="tasks" class="page"></section>
+      <section id="rulescheck" class="page"></section>
+      <section id="bbcode" class="page"></section>
+      <section id="selfservice" class="page"></section>
+      <section id="mobile" class="page"></section>
+      <section id="treasury" class="page"></section>
+      <section id="loans" class="page"></section>
+      <section id="revives" class="page"></section>
+      <section id="availabilitycal" class="page"></section>
+      <section id="promotions" class="page"></section>
+      <section id="awards" class="page"></section>
+      <section id="onboarding" class="page"></section>
+      <section id="mentors" class="page"></section>
+      <section id="knowledge" class="page"></section>
+      <section id="keyhealth" class="page"></section>
+      <section id="polls" class="page"></section>
+      <section id="mylife" class="page"></section>
+      <section id="layout" class="page"></section>
+      <section id="advisor" class="page"></section>
+      <section id="myadvisor" class="page"></section>
+      <section id="membereducation" class="page"></section>
+      <section id="weeklyreport" class="page"></section>
+      <section id="coachingqueue" class="page"></section>
+      <section id="factionneeds" class="page"></section>
+      <section id="microsite" class="page"></section>
+      <section id="setup" class="page"></section>
+      <section id="privacy" class="page"></section>
+      <section id="updates" class="page"></section>
+      <section id="backups" class="page"></section>
+      <section id="diagnostics" class="page"></section>
+      <section id="scannerinstall" class="page"></section>
+      <section id="gymgains" class="page"></section>
+      <section id="GymGainComparison" class="page"></section>
+      <section id="GymGainProjectionView" class="page"></section>
+      <section id="GymGoalEstimatorView" class="page"></section>
+      <section id="warcountdown" class="page"></section>
+      <section id="MemberActivityTable" class="page"></section>
+      <section id="ActivityHeatmap" class="page"></section>
+      <section id="WarReadinessReportView" class="page"></section>
+      <section id="scannerdeep" class="page"></section>
+      <section id="visuals" class="page"></section>
+      <section id="scanneroptin" class="page"></section>
+      <section id="recommendations" class="page"></section>
+      <section id="taborganizer" class="page"></section>
+      <section id="tokens" class="page"></section>
+      <section id="commands" class="page"></section>
+      <section id="protection" class="page"></section>
+      <section id="safemode" class="page"></section>
+      <section id="manual" class="page"></section>
+      <section id="theme" class="page"></section>
+      <section id="comms" class="page"></section>
+      <section id="settings" class="page"></section>
+      <section id="permissions" class="page"></section>
+      <section id="admin" class="page"></section>
+    </main>
+  </div>
+  <?!= include('Client'); ?>
+</body>
+</html>

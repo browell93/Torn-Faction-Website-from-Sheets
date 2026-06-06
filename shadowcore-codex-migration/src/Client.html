@@ -1,0 +1,1438 @@
+<script>
+const state = {
+  sessionId: getStoredSessionId_(),
+  data: null,
+  page: normalizePageKey(requestedPageFromUrl() || 'dashboard')
+};
+
+function requestedPageFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    return url.searchParams.get('page') || url.searchParams.get('p') || '';
+  } catch (e) {
+    const m = String(window.location.search || '').match(/[?&](?:page|p)=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+}
+
+function normalizePageKey(page) {
+  page = String(page || 'dashboard').trim();
+  if (!page) page = 'dashboard';
+  if (page === 'htmlcode') page = 'bbcode';
+  return page;
+}
+
+function scUserField_(user, keys, fallback='') {
+  user = user || {};
+  for (const k of keys) {
+    if (user[k] !== undefined && user[k] !== null && String(user[k]).trim() !== '') return user[k];
+  }
+  return fallback;
+}
+function scNormalizeUser_(session) {
+  const u = (session && session.user) || session || {};
+  return {
+    sessionId: session && session.sessionId || u.sessionId || '',
+    tornId: String(scUserField_(u, ['tornId','Torn_ID','TornId','torn_id','player_id','Player_ID','user_id','User_ID','id','ID'], '')).trim(),
+    name: String(scUserField_(u, ['name','Name','player_name','Player_Name','username','Username'], 'Member')).trim(),
+    role: String(scUserField_(u, ['role','Role'], 'Member')).trim(),
+    roleValue: Number(scUserField_(u, ['roleValue','Role_Value','role_value'], 1)) || 1
+  };
+}
+
+// v2.6.8: Navigation/session stabilization helpers.
+// The old lazy page loader could overwrite the current logged-in session with
+// a public/null payload after clicking a tab. These helpers keep the browser's
+// saved session and permission payload unless the user explicitly logs out.
+function getStoredSessionId_() {
+  try {
+    return localStorage.getItem('sc_session') || sessionStorage.getItem('sc_session') || '';
+  } catch (e) { return ''; }
+}
+
+function setStoredSessionId_(sessionId) {
+  sessionId = String(sessionId || '').trim();
+  state.sessionId = sessionId;
+  try {
+    if (sessionId) {
+      localStorage.setItem('sc_session', sessionId);
+      sessionStorage.setItem('sc_session', sessionId);
+    } else {
+      localStorage.removeItem('sc_session');
+      sessionStorage.removeItem('sc_session');
+      localStorage.removeItem('sc_session_obj');
+      sessionStorage.removeItem('sc_session_obj');
+    }
+  } catch (e) {}
+}
+
+// v2.6.9: Keep a copy of the last known session object in browser storage.
+// The lightweight page loader often returns page data without a session object;
+// that must not visually log the user out during navigation.
+function getStoredSessionObject_() {
+  try {
+    const raw = sessionStorage.getItem('sc_session_obj') || localStorage.getItem('sc_session_obj') || '';
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+}
+function setStoredSessionObject_(session) {
+  try {
+    if (session && typeof session === 'object') {
+      const raw = JSON.stringify(session);
+      localStorage.setItem('sc_session_obj', raw);
+      sessionStorage.setItem('sc_session_obj', raw);
+    }
+  } catch (e) {}
+}
+function hasAnySessionId_() {
+  return !!(state.sessionId || getStoredSessionId_());
+}
+function activeSession_() {
+  // v2.6.10: Never let an old admin/leader session object override a newer API/member session ID.
+  const sid = state.sessionId || getStoredSessionId_();
+  const inMemory = state.data && state.data.session;
+  if (inMemory && (!sid || !inMemory.sessionId || String(inMemory.sessionId) === String(sid))) return inMemory;
+  const stored = getStoredSessionObject_();
+  if (stored && (!sid || !stored.sessionId || String(stored.sessionId) === String(sid))) return stored;
+  return null;
+}
+
+function clearClientAuthState_() {
+  // Clears every browser-side auth fallback we have used across v2.6.x.
+  try {
+    localStorage.removeItem('sc_session');
+    localStorage.removeItem('sc_session_obj');
+    localStorage.removeItem('sc_admin_token');
+    localStorage.removeItem('sc_admin_token_remember');
+    localStorage.removeItem('sc_remember_admin_token');
+    localStorage.removeItem('sc_leader_token');
+    sessionStorage.removeItem('sc_session');
+    sessionStorage.removeItem('sc_session_obj');
+    sessionStorage.removeItem('sc_admin_token');
+  } catch (e) {}
+  try { if (String(window.name || '').indexOf('sc_session') >= 0) window.name = ''; } catch (e) {}
+  try { if (String(location.hash || '').indexOf('scsid=') >= 0) history.replaceState(null, document.title, location.pathname + location.search); } catch (e) {}
+  state.sessionId = '';
+  if (state.data) state.data.session = null;
+}
+
+function replaceActiveSession_(sessionId, sessionObj) {
+  // v2.6.10: Explicit auth-mode switch. API login replaces leader login, and leader login replaces API login.
+  sessionId = String(sessionId || '').trim();
+  clearClientAuthState_();
+  setStoredSessionId_(sessionId);
+  if (sessionObj && typeof sessionObj === 'object') {
+    sessionObj.sessionId = sessionObj.sessionId || sessionId;
+    setStoredSessionObject_(sessionObj);
+    state.data = state.data || {};
+    state.data.session = sessionObj;
+  }
+}
+
+
+function updateLoginBadge_() {
+  try {
+    const el = document.getElementById('loginBadge') || document.querySelector('.login-badge');
+    if (el) el.textContent = activeSession_() ? ((activeSession_().role || 'Member') + ' · ' + (activeSession_().name || 'Logged in')) : 'Not logged in';
+  } catch (e) {}
+}
+
+function validateLoginSession_(session, source) {
+  source = source || 'Login';
+  // v2.6.16 supports either a direct session object or a wrapped {ok, session}.
+  if (session && session.session && typeof session.session === 'object') session = session.session;
+  if (!session || typeof session !== 'object') {
+    throw new Error(source + ' failed: the server returned no session. Make sure Security.gs v2.6.19 is installed and redeployed.');
+  }
+  if (session.ok === false) {
+    throw new Error(source + ' failed: ' + (session.error || session.message || 'Unknown server error.'));
+  }
+  const sid = session.sessionId || session.session_id || session.id || '';
+  if (!sid) {
+    const err = session.error || session.message || JSON.stringify(session).slice(0, 300);
+    throw new Error(source + ' failed: missing sessionId' + (err ? ' — ' + err : '.'));
+  }
+  session.sessionId = String(sid);
+  session.user = session.user || {};
+  return session;
+}
+
+function mergeIncomingData_(incoming) {
+  incoming = incoming || {};
+  const previous = state.data || {};
+
+  // v2.6.9: A page-specific payload may omit session or return null while
+  // the browser still has a valid logged-in context. Never erase a known session
+  // during navigation; only logout should clear it.
+  const previousSession = previous.session || getStoredSessionObject_();
+  if (!incoming.session && previousSession && hasAnySessionId_()) {
+    incoming.session = previousSession;
+  }
+  if (incoming.session) setStoredSessionObject_(incoming.session);
+
+  // Keep permissions/prefs unless the new payload has a real v25 object. Some
+  // lazy page responses omit v25 for speed; losing it hides/denies pages.
+  if ((!incoming.v25 || typeof incoming.v25 !== 'object' || Object.keys(incoming.v25).length === 0) && previous.v25) {
+    incoming.v25 = previous.v25;
+  }
+
+  // Preserve public info/theme if a page-specific response omits it.
+  if ((!incoming.public || typeof incoming.public !== 'object' || Object.keys(incoming.public).length === 0) && previous.public) {
+    incoming.public = previous.public;
+  }
+
+  state.data = Object.assign({}, previous, incoming);
+  if (state.data && state.data.session) setStoredSessionObject_(state.data.session);
+  if (hasAnySessionId_()) state.sessionId = state.sessionId || getStoredSessionId_();
+  return state.data;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  // v2.6.2: direct handlers plus delegated fallback, so nav keeps working even
+  // if buttons are moved/filtered by layout permissions.
+  document.querySelectorAll('.nav').forEach(btn => btn.addEventListener('click', (ev) => { ev.preventDefault(); showPage(btn.dataset.page, true); }));
+  document.addEventListener('click', (ev) => {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.nav[data-page]') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    showPage(btn.dataset.page, true);
+  });
+  document.getElementById('refreshBtn').addEventListener('click', loadState);
+  document.getElementById('connectBtn').addEventListener('click', connectKey);
+  document.getElementById('leaderLoginBtn').addEventListener('click', leaderLogin);
+  const memberTokenBtn = document.getElementById('memberTokenLoginBtn');
+  if (memberTokenBtn) memberTokenBtn.addEventListener('click', memberTokenLogin);
+  loadState();
+});
+
+function gas(fn, ...args) {
+  return new Promise((resolve, reject) => {
+    google.script.run.withSuccessHandler(resolve).withFailureHandler(err => reject(err))[fn](...args);
+  });
+}
+
+function toast(msg, isError=false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  el.style.borderColor = isError ? '#ef4444' : '#374151';
+  setTimeout(() => el.classList.add('hidden'), 5000);
+}
+
+async function loadState() {
+  try {
+    state.sessionId = state.sessionId || getStoredSessionId_();
+    const urlPage = requestedPageFromUrl();
+    if (urlPage) state.page = normalizePageKey(urlPage);
+    const page = normalizePageKey(state.page || 'dashboard');
+    const data = await gas('getPageStateV26', state.sessionId, page);
+    mergeIncomingData_(data);
+    const pub = state.data.public || {};
+    document.getElementById('apiDisclosure').textContent = pub.apiDisclosure || '';
+    renderAll();
+    await showPage(page, false);
+  } catch (err) {
+    toast(err.message || String(err), true);
+    renderPerfFailSafe(err);
+  }
+}
+
+async function showPage(page, pushUrl=false) {
+  state.sessionId = state.sessionId || getStoredSessionId_();
+  page = normalizePageKey(page);
+
+  // v2.6.2: Do NOT silently redirect denied/private pages to Dashboard.
+  // Keep the clicked page active and let renderCurrentPageV26 show either
+  // Login Required or Access Denied. This fixes nav clicks always loading Dashboard.
+  state.page = page;
+
+  document.querySelectorAll('.nav').forEach(b => b.classList.toggle('active', normalizePageKey(b.dataset.page) === page));
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === page));
+  document.getElementById('pageTitle').textContent = pageTitle(page);
+
+  if (pushUrl) {
+    const url = new URL(location.href);
+    url.searchParams.set('page', page);
+    history.replaceState(null, '', url.toString());
+  }
+
+  await loadPageDataV26(page);
+}
+
+async function loadPageDataV26(page) {
+  state.sessionId = state.sessionId || getStoredSessionId_();
+  const el = byId(page);
+  if (!el) return;
+  el.innerHTML = '<div class="card"><h3>Loading '+esc(pageTitle(page))+'</h3><p class="muted">Loading only this page to keep ShadowCore HQ responsive...</p></div>';
+  try {
+    const data = await gas('getPageStateV26', state.sessionId, page);
+    mergeIncomingData_(data);
+    renderAll();
+  } catch (err) {
+    // v2.6.9: If the server refuses/forgets the session during a lazy page load,
+    // do not kick the user out. Render with already-loaded data and let action
+    // buttons validate server-side when clicked.
+    if (activeSession_()) {
+      renderAll();
+      toast('Page loaded from local session fallback. Some live data may need Refresh.', false);
+      return;
+    }
+    el.innerHTML = `<div class="card"><h3>Page failed to load</h3><p class="warnbox">${esc(err.message || String(err))}</p><button onclick="loadPageDataV26(state.page)">Retry this page</button><button class="secondary" onclick="showPage('dashboard',true)">Back to Dashboard</button></div>`;
+    toast(err.message || String(err), true);
+  }
+}
+
+function renderPerfFailSafe(err) {
+  const el = byId('dashboard');
+  if (!el) return;
+  el.innerHTML = `<div class="card"><h3>ShadowCore HQ Safe Boot</h3><p class="warnbox">The full site did not load. This usually means the sheet is overloaded or a page is reading too much data.</p><p>${esc(err && (err.message || String(err)) || '')}</p><div class="actions"><button onclick="loadState()">Retry</button><button onclick="showPage('diagnostics',true)">Diagnostics</button><button onclick="showPage('safemode',true)">Safe Mode</button></div></div>`;
+  document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === 'dashboard'));
+}
+
+function pageTitle(page) {
+  return {
+    layout:'My Layout', permissions:'Page Permissions', dashboard:'Dashboard', war:'War Room', battleplan:'Battle Plan', commitments:'War Contracts', strike:'Strike Teams', chain:'Chain Tracker', targets:'Target Board',
+    payouts:'Payout Center', requests:'Armory Requests', recruiting:'Recruiting', vetting:'Applicant Vetting', training:'Training',
+    scorecards:'Member Scorecards', oc:'OC Planner', enemy:'Enemy Intel', chainplan:'Chain Planner', economy:'Economy Ledger', discipline:'Discipline', tasks:'Officer Tasks', rulescheck:'Rule Checks', bbcode:'HTML Code Editor', htmlcode:'HTML Code Editor', selfservice:'Self-Service', mobile:'Mobile War',
+    treasury:'Treasury', loans:'Loans', revives:'Revive Support', availabilitycal:'Availability Calendar', promotions:'Promotions', awards:'Awards', onboarding:'Onboarding', mentors:'Mentors', knowledge:'Knowledge Base', keyhealth:'API Key Health', polls:'Polls', mylife:'My Faction Life', advisor:'Advisor Center', myadvisor:'My Advisor', membereducation:'Member Education', weeklyreport:'Weekly Reports', coachingqueue:'Coaching Queue', factionneeds:'Faction Needs', microsite:'Recruitment Microsite',
+    setup:'Setup Wizard', privacy:'Privacy / API Disclosure', updates:'Version / Updates', backups:'Backups', diagnostics:'Diagnostics', scannerinstall:'Scanner Install', gymgains:'Gym Gains Lab', GymGainComparison:'Gym Comparison', GymGainProjectionView:'Gym Projection', GymGoalEstimatorView:'Goal Estimator', warcountdown:'105h Enemy Watch', MemberActivityTable:'Member Activity Table', ActivityHeatmap:'Activity Heatmap', WarReadinessReportView:'War Readiness Report', scannerdeep:'Scanner Deep Data', visuals:'Graphs / Visuals', scanneroptin:'Scanner Opt-In', recommendations:'Smart Recommendations', taborganizer:'Tab Organizer', tokens:'Member Tokens', commands:'Discord Commands', protection:'Sheet Protection', safemode:'Safe Mode', manual:'Admin Manual', theme:'Theme',
+    comms:'Comms & Reports', settings:'Settings', admin:'Admin'
+  }[page] || page;
+}
+
+async function connectKey() {
+  try {
+    // v2.6.19: API login is an auth-mode switch. Clear any old admin/leader state
+    // BEFORE connecting so a failed API attempt cannot visually fall back to admin.
+    clearClientAuthState_();
+    updateLoginBadge_ && updateLoginBadge_();
+    const key = document.getElementById('apiKeyInput').value;
+    const consent = {
+      accepted: document.getElementById('consentInput').checked,
+      discord: document.getElementById('discordInput').value,
+      selections: document.getElementById('selectionsInput').value,
+      accessLevel: 'Custom/Member'
+    };
+    const session = validateLoginSession_(await gas('sc2619ConnectApiKey', key, consent), 'API login');
+    const baseUser = scNormalizeUser_(session);
+    const sessionObj = Object.assign(baseUser, {
+      sessionId: session.sessionId,
+      apiLogin: true,
+      adminToken: false,
+      authMode: 'API'
+    });
+    replaceActiveSession_(session.sessionId, sessionObj);
+    const autoSync = session.autoMemberApiSync || {};
+    if (autoSync && autoSync.ok) {
+      toast('Connected as ' + (session.user && session.user.name ? session.user.name : 'member') + '. Auto sync is active.');
+    } else if (autoSync && autoSync.error) {
+      toast('Connected, but auto sync could not run yet: ' + autoSync.error, true);
+    } else {
+      toast('Connected as ' + (session.user && session.user.name ? session.user.name : 'member'));
+    }
+    await loadState();
+  } catch (err) { toast(err.message || String(err), true); }
+}
+
+async function leaderLogin() {
+  try {
+    const token = document.getElementById('leaderTokenInput').value;
+    const session = validateLoginSession_(await gas('sc2619LeaderLogin', token), 'Leader token login');
+    replaceActiveSession_(session.sessionId, {
+      sessionId: session.sessionId,
+      tornId: 'LEADER',
+      name: (session.user && session.user.name) || 'Leader',
+      role: 'Admin',
+      roleValue: 99,
+      adminToken: true,
+      apiLogin: false,
+      authMode: 'ADMIN'
+    });
+    toast('Leader login successful.');
+    await loadState();
+  } catch (err) { toast(err.message || String(err), true); }
+}
+
+async function memberTokenLogin() {
+  try {
+    const token = document.getElementById('memberTokenInput').value;
+    const session = validateLoginSession_(await gas('memberTokenLogin', token), 'Member token login');
+    const baseUser = scNormalizeUser_(session);
+    replaceActiveSession_(session.sessionId, Object.assign(baseUser, {
+      sessionId: session.sessionId,
+      memberTokenLogin: true,
+      adminToken: false
+    }));
+    toast('Token login successful.');
+    await loadState();
+  } catch (err) { toast(err.message || String(err), true); }
+}
+
+
+function debugSessionV268() {
+  return {
+    stateSessionId: state.sessionId,
+    storedSessionId: getStoredSessionId_(),
+    hasSession: !!activeSession_(),
+    session: activeSession_(),
+    storedSessionObj: getStoredSessionObject_(),
+    page: state.page,
+    hasV25: !!(state.data && state.data.v25),
+    allowedPages: state.data && state.data.v25 ? state.data.v25.allowedPages : null
+  };
+}
+window.debugSessionV268 = debugSessionV268;
+window.clearShadowCoreLoginV2610 = function(){ clearClientAuthState_(); location.reload(); };
+
+async function debugMyDataV2612() {
+  try {
+    const sid = state.sessionId || getStoredSessionId_();
+    const res = await gas('debugMyDataDirectV2612', sid);
+    console.log('ShadowCore v2.6.12 My Data Debug', res);
+    alert(JSON.stringify(res, null, 2).slice(0, 3500));
+  } catch (err) {
+    console.error(err);
+    alert(err.message || String(err));
+  }
+}
+window.debugMyDataV2612 = debugMyDataV2612;
+
+function renderAll() {
+  const d = state.data || {};
+  const session = d.session || getStoredSessionObject_();
+  if (session && !d.session) {
+    state.data = state.data || {};
+    state.data.session = session;
+  }
+  document.getElementById('sessionBadge').textContent = session ? `${session.name} · ${session.role}` : 'Not logged in';
+  document.getElementById('loginPanel').style.display = session ? 'none' : 'block';
+  applyV25Visibility();
+  renderCurrentPageV26();
+}
+
+function renderCurrentPageV26() {
+  const page = state.page || 'dashboard';
+  const map = {
+    dashboard: renderDashboard, war: renderWar, battleplan: renderV12BattlePlan, commitments: renderV12Commitments, strike: renderV12StrikeTeams,
+    chain: renderChain, targets: renderTargets, payouts: renderPayouts, requests: renderRequests, recruiting: renderRecruiting, vetting: renderV12Vetting,
+    training: renderV12Training, scorecards: renderScorecards, oc: renderOC, enemy: renderEnemy, chainplan: renderV12ChainPlan, economy: renderV12Economy,
+    discipline: renderV12Discipline, tasks: renderV12Tasks, rulescheck: renderV12RuleChecks, bbcode: renderV12HtmlCodeEditor, htmlcode: renderV12HtmlCodeEditor,
+    selfservice: renderV12SelfService, mobile: renderV12Mobile, treasury: renderV13Treasury, loans: renderV13Loans, revives: renderV13Revives,
+    availabilitycal: renderV13AvailabilityCalendar, promotions: renderV13Promotions, awards: renderV13Awards, onboarding: renderV13Onboarding, mentors: renderV13Mentors,
+    knowledge: renderV13Knowledge, keyhealth: renderV13KeyHealth, polls: renderV13Polls, mylife: renderV13MyLife, layout: renderV25Layout, permissions: renderV25Permissions,
+    advisor: renderV24Advisor, myadvisor: renderV24MyAdvisor, membereducation: renderV24MemberEducation, weeklyreport: renderV24WeeklyReport, coachingqueue: renderV24CoachingQueue, factionneeds: renderV24FactionNeeds,
+    microsite: renderV13Microsite, setup: renderV16Setup, privacy: renderV16Privacy, updates: renderV16Updates, backups: renderV16Backups, diagnostics: renderV16Diagnostics, scannerinstall: renderV16ScannerInstall,
+    gymgains: renderV20GymGains, GymGainComparison: renderV20GymComparison, GymGainProjectionView: renderV20GymProjectionView, GymGoalEstimatorView: renderV20GymGoalEstimatorView,
+    warcountdown: renderV19WarCountdown, MemberActivityTable: renderV19MemberActivityTable, ActivityHeatmap: renderV19ActivityHeatmap, WarReadinessReportView: renderV19WarReadinessReportView,
+    scannerdeep: renderV18ScannerDeep, visuals: renderV18Visuals, scanneroptin: renderV18ScannerOptIn, recommendations: renderV18Recommendations, taborganizer: renderV18TabOrganizer,
+    tokens: renderV16Tokens, commands: renderV16Commands, protection: renderV16Protection, safemode: renderV16SafeMode, manual: renderV16Manual, theme: renderV16Theme,
+    comms: renderComms, settings: renderSettings, admin: renderAdmin
+  };
+  const fn = map[page] || renderDashboard;
+  const publicPages = new Set(['dashboard','microsite','recruiting','privacy']);
+
+  // v2.6.2: route is allowed to load, but page content may require login/role.
+  // Show the message inside the clicked page instead of sending users to Dashboard.
+  if (!activeSession_() && !publicPages.has(page)) {
+    const el = byId(page) || byId('dashboard');
+    if (el) el.innerHTML = '<div class="card"><h3>Login required</h3><p class="muted">This page is private. Your browser did not have a valid session for this page. Log in again, then try this tab. If this repeats, clear browser site data and redeploy v2.6.9.</p></div>';
+    return;
+  }
+  if (activeSession_() && !v25CanView(page)) {
+    const el = byId(page) || byId('dashboard');
+    if (el) el.innerHTML = '<div class="card"><h3>Access denied</h3><p class="muted">Your current role is not allowed to view this area. Leaders can change this under Page Permissions.</p></div>';
+    return;
+  }
+
+  try { fn(); } catch (err) {
+    const el = byId(page) || byId('dashboard');
+    if (el) el.innerHTML = '<div class="card"><h3>Render error</h3><p class="warnbox">'+esc(err.message || String(err))+'</p><button onclick="loadPageDataV26(state.page)">Retry this page</button></div>';
+    console.error(err);
+  }
+}
+
+
+function v25(){ return (state.data && state.data.v25) || {}; }
+function v25Prefs(){ return v25().preferences || {}; }
+function v25HasPermissionPayload(){ return !!(state.data && state.data.v25 && Array.isArray(state.data.v25.allowedPages)); }
+function v25IsAdminSession(){
+  const s = activeSession_();
+  if (!s) return false;
+  const role = String(s.role || '').toUpperCase();
+  return Number(s.roleValue || 0) >= 5 || role === 'LEADER' || role === 'DEVELOPER' || role === 'ADMIN';
+}
+function v25CriticalAdminPages(){
+  return new Set(['permissions','layout','settings','admin','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme']);
+}
+function v25AllowedPages(){
+  const base = ['dashboard','microsite','recruiting','privacy'];
+  const allNav = Array.from(document.querySelectorAll('.nav')).map(b => normalizePageKey(b.dataset.page)).filter(Boolean);
+  if (v25IsAdminSession()) return new Set(base.concat(allNav).concat(Array.from(v25CriticalAdminPages())));
+  if (!v25HasPermissionPayload()) return new Set(base.concat(allNav));
+  return new Set((v25().allowedPages || []).map(normalizePageKey).concat(base));
+}
+function v25CanView(page){
+  page = normalizePageKey(page);
+  // Admin-token / Leader sessions must never be locked out of the permissions tools.
+  if (v25IsAdminSession()) return true;
+  // Do not force direct links back to dashboard while permissions are still loading,
+  // and do not let missing v25 sheets break page routing. Backend still controls data.
+  if (!v25HasPermissionPayload()) return true;
+  if (!activeSession_()) return ['dashboard','microsite','recruiting','privacy'].includes(page);
+  return v25AllowedPages().has(page);
+}
+function v25DefaultPage(){
+  const pref = v25Prefs();
+  const preferred = normalizePageKey(pref.Default_Page || (v25().defaultPage) || 'dashboard');
+  if (v25CanView(preferred)) return preferred;
+  if (v25CanView('mylife')) return 'mylife';
+  return 'dashboard';
+}
+function applyV25Visibility(){
+  const allowed = v25AllowedPages();
+  document.querySelectorAll('.nav').forEach(btn => {
+    const page = normalizePageKey(btn.dataset.page);
+    const show = allowed.has(page);
+    btn.classList.toggle('hidden-by-v25', !show);
+  });
+  document.querySelectorAll('[data-v25-section]').forEach(el => {
+    const key = el.dataset.v25Section;
+    const collapsed = v25CsvSet(v25Prefs().Collapsed_Sections)[key];
+    el.classList.toggle('v25-collapsed', !!collapsed);
+  });
+}
+function v25CsvSet(csv){ const out={}; String(csv||'').split(',').map(x=>x.trim()).filter(Boolean).forEach(x=>out[x]=true); return out; }
+function v25SetToCsv(obj){ return Object.keys(obj).filter(k=>obj[k]).join(','); }
+function v25Groups(){
+  const pages = v25().pages || [];
+  const grouped = {};
+  pages.forEach(p => { (grouped[p.Category||'Other'] ||= []).push(p); });
+  return grouped;
+}
+
+function renderDashboard() {
+  const d = state.data || {}, s = d.dashboard || {}, announcements = d.announcements || [];
+  const events = (d.events || []).slice(-5).reverse();
+  byId('dashboard').innerHTML = `
+    <div class="grid four">
+      ${kpi('Members', s.members ?? 0)}
+      ${kpi('Available', s.available ?? 0, 'status-ok')}
+      ${kpi('Hospital', s.hospitalized ?? 0, 'status-bad')}
+      ${kpi('Unpaid payouts', money(s.unpaidPayouts ?? 0))}
+    </div>
+    <div class="grid four">
+      ${kpi('Jailed', s.jailed ?? 0, 'status-warn')}
+      ${kpi('Traveling', s.traveling ?? 0, 'status-warn')}
+      ${kpi('Applications', s.pendingApplications ?? 0)}
+      ${kpi('Requests', s.pendingRequests ?? 0)}
+    </div>
+    <div class="grid two">
+      <div class="card"><h3>Live chain</h3>${kpi('Current chain', s.chain ?? 0)}${kpi('Next bonus', s.nextBonus ?? '')}<p>Danger: <b class="${s.chainDanger==='HIGH'?'status-bad':'status-warn'}">${esc(s.chainDanger || 'Unknown')}</b></p></div>
+      <div class="card"><h3>Announcements</h3>${announcements.map(a=>`<p><b>${esc(a.Title)}</b><br>${esc(a.Message)}</p>`).join('') || '<p class="muted">No announcements.</p>'}</div>
+    </div>
+    <div class="grid two">
+      <div class="card"><h3>Upcoming events</h3>${table(events, ['Title','Type','Start_Time','Status','Description'])}</div>
+      <div class="card"><h3>My profile</h3>${renderObject(d.myStatus || {})}${renderObject(d.myScorecard || {})}</div>
+    </div>
+    <div class="card"><h3>Member live status / API fields</h3><p class="muted">Energy, nerve, happy, life, cooldowns, and hospital data fill from member API/scanner readiness snapshots when members opt in.</p>${table((d.memberStatuses || (v22().memberStatusesMerged||[])).slice().reverse(), ['Name','Status','Last_Action','Life','Energy','Nerve','Happy','Hospital_Until','Jail','Travel','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}</div>`;
+}
+
+function renderWar() {
+  const d = state.data || {}, wars = d.wars || [], targets = d.warTargets || [];
+  byId('war').innerHTML = `
+    <div class="grid two">
+      <div class="card">
+        <h3>War command actions</h3>
+        <div class="actions">
+          <button onclick="manualSync()">Manual Sync</button>
+          <button onclick="recalcPayouts()">Recalculate Payouts</button>
+          <button onclick="generateReport()">Generate Report</button>
+          <button onclick="runOptimizer()">Run Target Optimizer</button>
+          <button class="secondary" onclick="endActiveWar()">End Active War</button>
+        </div>
+        <p class="muted">Set a war row to Active. v1.1 can create/pause/end war rows from here.</p>
+      </div>
+      <div class="card">
+        <h3>Create / update active war</h3>
+        <label>War ID</label><input id="warId" placeholder="WAR-2026-05-31 or leave blank">
+        <label>Enemy faction ID</label><input id="warEnemyId" placeholder="Enemy faction ID">
+        <label>Enemy name</label><input id="warEnemyName" placeholder="Enemy faction name">
+        <label>Status</label><select id="warStatus"><option>Active</option><option>Planned</option><option>Paused</option><option>Ended</option></select>
+        <label>Notes</label><textarea id="warNotes"></textarea>
+        <button onclick="saveWar()">Save War</button>
+      </div>
+    </div>
+    <div class="card"><h3>Wars</h3>${table(wars.slice().reverse(), ['War_ID','Enemy_Faction_ID','Enemy_Name','Status','Start_Time','End_Time','Our_Score','Enemy_Score','Notes'])}</div>
+    <div class="card"><h3>Recommended targets</h3>${table(targets, ['Target_ID','Enemy_Name','Status','Priority','Assigned_To_Name','Score','Notes'])}</div>`;
+}
+
+function renderChain() {
+  const rows = (state.data && state.data.chainLog) || [];
+  byId('chain').innerHTML = `<div class="card"><h3>Chain history</h3>${table(rows.slice().reverse(), ['Timestamp','Chain','Timeout_Sec','Next_Bonus','Hits_Needed','Available_Members','Danger_Level','Notes'])}</div>`;
+}
+
+function renderTargets() {
+  const rows = (state.data && state.data.warTargets) || [];
+  byId('targets').innerHTML = `
+    <div class="grid two">
+      <div class="card">
+        <h3>Bulk enemy import</h3>
+        <p class="muted">One per line. Formats: <span class="pill">ID, Name, Level, Status, Good, Avoid, Notes</span> or <span class="pill">Name, ID, Level, Status, Good, Avoid, Notes</span></p>
+        <textarea id="enemyBulk" class="large" placeholder="123456, EnemyName, 35, Okay, TRUE, FALSE, weak target"></textarea>
+        <button onclick="bulkImportEnemies()">Import enemies + optimize</button>
+      </div>
+      <div class="card">
+        <h3>Update / assign target</h3>
+        <label>Target ID</label><input id="targetId" placeholder="Target_ID from table">
+        <label>Status</label><select id="targetStatus"><option>Assigned</option><option>Complete</option><option>Skipped</option><option>Waiting</option></select>
+        <label>Priority</label><select id="targetPriority"><option>High</option><option>Medium</option><option>Low</option></select>
+        <label>Assign to Torn ID</label><input id="assignTornId" placeholder="Member Torn ID">
+        <label>Notes</label><textarea id="targetNotes"></textarea>
+        <button onclick="saveTargetUpdate()">Update Target</button>
+        <button class="secondary" onclick="assignTarget()">Assign Member</button>
+      </div>
+    </div>
+    <div class="card"><h3>Target optimizer board</h3>${table(rows, ['Target_ID','Enemy_ID','Enemy_Name','Status','Priority','Assigned_To_ID','Assigned_To_Name','Score','Notes','Updated'])}</div>`;
+}
+
+function renderPayouts() {
+  const d = state.data || {}, rows = (d.payouts || d.myPayouts || []), report = (d.reports || []).slice(-1)[0];
+  byId('payouts').innerHTML = `
+    <div class="card">
+      <h3>War payouts</h3>
+      <div class="actions"><button onclick="recalcPayouts()">Recalculate</button><button onclick="generateReport()">Generate Report</button><button class="secondary" onclick="exportPayoutCsv()">Export payout CSV text</button></div>
+      <div class="inline">
+        <div><label>Payout row key</label><input id="paidKey" placeholder="War_ID value from payout row"></div>
+        <div><label>Paid note</label><input id="paidNote" placeholder="Paid by faction bank"></div>
+        <div><button onclick="markPaid()">Mark Paid</button></div>
+      </div>
+      ${table(rows, ['War_ID','Name','Hits','Respect','KOs','Assists','Bonuses','Penalties','Total','Paid','Paid_Date'])}
+    </div>
+    <div class="card"><h3>Latest report archive</h3><pre class="codebox">${esc(report ? report.BBCode : 'No report generated yet.')}</pre></div>`;
+}
+
+function renderRequests() {
+  const rows = (state.data && (state.data.armoryRequests || state.data.myRequests)) || [];
+  byId('requests').innerHTML = `
+    <div class="grid two">
+      <div class="card">
+        <h3>Submit request</h3>
+        <label>Type</label><input id="reqType" placeholder="Medical / Drug / Weapon / Armor / Money / Revive">
+        <label>Item</label><input id="reqItem" placeholder="Item name">
+        <label>Quantity</label><input id="reqQty" type="number" value="1">
+        <label>Urgency</label><select id="reqUrgency"><option>Normal</option><option>War</option><option>Emergency</option></select>
+        <label>Reason</label><textarea id="reqReason"></textarea>
+        <button onclick="submitRequest()">Submit Request</button>
+      </div>
+      <div class="card">
+        <h3>Officer review</h3>
+        <label>Request ID</label><input id="reviewReqId" placeholder="REQ-...">
+        <label>Status</label><select id="reviewReqStatus"><option>Approved</option><option>Denied</option><option>Fulfilled</option><option>Pending</option></select>
+        <label>Notes</label><textarea id="reviewReqNotes"></textarea>
+        <button onclick="reviewRequest()">Save Review</button>
+      </div>
+    </div>
+    <div class="card"><h3>Request queue</h3>${table(rows, ['Request_ID','Timestamp','Name','Request_Type','Item','Quantity','Urgency','Status','Reviewed_By','Notes'])}</div>`;
+}
+
+function renderRecruiting() {
+  const apps = (state.data && state.data.applications) || [];
+  byId('recruiting').innerHTML = `
+    <div class="grid two">
+      <div class="card">
+        <h3>Apply to ShadowCore</h3>
+        <label>Torn ID</label><input id="appTornId">
+        <label>Name</label><input id="appName">
+        <label>Level</label><input id="appLevel" type="number">
+        <label>Age days</label><input id="appAge" type="number">
+        <label>Battle stats estimate</label><input id="appStats">
+        <label>Activity</label><input id="appActivity" placeholder="Daily / evenings / weekends">
+        <label>War availability</label><input id="appAvail">
+        <label>Discord</label><input id="appDiscord">
+        <label>Previous faction</label><input id="appPrev">
+        <label>Why join?</label><textarea id="appNotes"></textarea>
+        <button onclick="submitApplication()">Submit Application</button>
+      </div>
+      <div class="card">
+        <h3>Officer review</h3>
+        <label>Application ID</label><input id="reviewAppId" placeholder="APP-...">
+        <label>Status</label><select id="reviewAppStatus"><option>Interview</option><option>Accepted</option><option>Denied</option><option>New</option></select>
+        <label>Note</label><textarea id="reviewAppNote"></textarea>
+        <button onclick="reviewApp()">Save Review</button>
+      </div>
+    </div>
+    <div class="card"><h3>Application queue</h3>${table(apps, ['Application_ID','Timestamp','Name','Torn_ID','Level','Activity','War_Availability','Discord','Score','Status','Reviewed_By','Notes'])}</div>`;
+}
+
+function renderScorecards() {
+  const rows = (state.data && state.data.scorecards) || (state.data && state.data.myScorecard ? [state.data.myScorecard] : []);
+  byId('scorecards').innerHTML = `<div class="card"><h3>Member scorecards</h3>${table(rows, ['Torn_ID','Name','Activity_Score','War_Score','Reliability_Score','Growth_Score','Faction_Value','Grade','Recommended_Role','Warnings'])}</div>`;
+}
+
+function renderOC() {
+  const rows = (state.data && state.data.ocPlanner) || [];
+  byId('oc').innerHTML = `
+    <div class="card">
+      <h3>Add OC plan row</h3>
+      <div class="inline">
+        <div><label>Crime</label><input id="ocCrime"></div><div><label>Planned time</label><input id="ocTime"></div><div><label>Slot</label><input id="ocSlot"></div><div><label>Member Torn ID</label><input id="ocTornId"></div>
+      </div>
+      <div class="inline">
+        <div><label>Name</label><input id="ocName"></div><div><label>Role</label><input id="ocRole"></div><div><label>Status</label><input id="ocStatus" value="Planned"></div><div><button onclick="saveOc()">Save OC row</button></div>
+      </div>
+      <label>Notes</label><textarea id="ocNotes"></textarea>
+    </div>
+    <div class="card"><h3>Organized crime planner</h3>${table(rows, ['OC_ID','Crime','Planned_Time','Slot','Name','Role','Status','Reliability','Expected_Payout','Actual_Payout','Result','Notes'])}</div>`;
+}
+
+function renderEnemy() {
+  const d = state.data || {}, rows = d.enemyPlayers || [], factions = d.enemyFactions || [];
+  byId('enemy').innerHTML = `
+    <div class="grid two">
+      <div class="card"><h3>Add / update enemy player</h3>
+        <div class="inline">
+          <div><label>Enemy ID</label><input id="enemyId"></div><div><label>Name</label><input id="enemyName"></div><div><label>Faction ID</label><input id="enemyFaction"></div><div><label>Level</label><input id="enemyLevel"></div>
+        </div>
+        <div class="inline">
+          <div><label>Status</label><input id="enemyStatus" placeholder="Okay / Hospital / Travel"></div><div><label>Good target</label><select id="enemyGood"><option></option><option>TRUE</option><option>FALSE</option></select></div><div><label>Avoid</label><select id="enemyAvoid"><option></option><option>TRUE</option><option>FALSE</option></select></div><div><button onclick="saveEnemy()">Save Enemy</button></div>
+        </div>
+        <label>Notes</label><textarea id="enemyNotes"></textarea>
+      </div>
+      <div class="card"><h3>Enemy Faction Library</h3>
+        <label>Faction ID</label><input id="enemyFactionId2"><label>Name</label><input id="enemyFactionName2"><label>War record</label><input id="enemyWarRecord"><label>Timezone/activity pattern</label><input id="enemyTzPattern"><label>Strength notes</label><textarea id="enemyStrengths"></textarea><label>Weakness notes</label><textarea id="enemyWeaknesses"></textarea><button onclick="saveEnemyFaction()">Save Enemy Faction Profile</button>
+      </div>
+    </div>
+    <div class="card"><h3>Enemy factions</h3>${table(factions.slice().reverse(), ['Faction_ID','Name','Last_War_ID','War_Record','Timezone_Pattern','Strength_Notes','Weakness_Notes','Updated'])}</div>
+    <div class="card"><h3>Enemy intelligence</h3>${table(rows, ['Enemy_ID','Name','Faction_ID','Level','Status','Known_Strength','Good_Target','Avoid','Best_Attackers','Notes','Updated'])}</div>`;
+}
+
+function renderComms() {
+  const d = state.data || {}, reports = d.reports || [], events = d.events || [], announcements = d.announcements || [];
+  byId('comms').innerHTML = `
+    <div class="grid two">
+      <div class="card"><h3>New announcement</h3><label>Title</label><input id="annTitle"><label>Message</label><textarea id="annMessage"></textarea><label>Audience</label><input id="annAudience" value="All"><button onclick="saveAnnouncement()">Save Announcement</button></div>
+      <div class="card"><h3>Send Discord notice</h3><label>Channel key</label><select id="discordChannel"><option>Leadership</option><option>War</option><option>Chain</option><option>Applications</option><option>Armory</option></select><label>Message</label><textarea id="discordMsg"></textarea><button onclick="sendDiscordNotice()">Send Notice</button></div>
+    </div>
+    <div class="card"><h3>Discord Embed Alert</h3><div class="inline"><div><label>Channel</label><select id="embedChannel"><option>Leadership</option><option>War</option><option>Chain</option><option>Applications</option><option>Armory</option></select></div><div><label>Title</label><input id="embedTitle"></div><div><label>Description</label><input id="embedDesc"></div><div><button onclick="sendDiscordEmbed()">Send Embed</button></div></div><label>Fields, one per line as Name: Value</label><textarea id="embedFields" placeholder="War: ShadowCore vs Enemy\nChain: 227\nAvailable members: 14"></textarea></div>
+    <div class="card"><h3>Create event</h3><div class="inline"><div><label>Title</label><input id="evTitle"></div><div><label>Type</label><input id="evType" placeholder="War / Chain / Training"></div><div><label>Start</label><input id="evStart"></div><div><label>End</label><input id="evEnd"></div></div><label>Description</label><textarea id="evDesc"></textarea><button onclick="saveEvent()">Save Event</button></div>
+    <div class="grid two"><div class="card"><h3>Announcements</h3>${table(announcements, ['Timestamp','Title','Message','Audience','Active'])}</div><div class="card"><h3>Events</h3>${table(events.slice().reverse(), ['Title','Type','Start_Time','End_Time','Owner','Status','Description'])}</div></div>
+    <div class="card"><h3>Reports & HTML/Legacy Code</h3>${table(reports.slice().reverse(), ['Timestamp','Report_Type','War_ID','Title','Body','BBCode'])}</div>`;
+}
+
+function renderSettings() {
+  const d = state.data || {}, settings = d.settings || {};
+  const keys = ['Faction_Name','Faction_ID','Enable_Discord_Alerts','Discord_Webhook_War','Discord_Webhook_Chain','Discord_Webhook_Applications','Discord_Webhook_Armory','Discord_Webhook_Leadership','Payout_Per_Hit','Payout_Per_Respect','Payout_Per_KO','Payout_Per_Assist','Payout_MVP_Bonus_1','Payout_MVP_Bonus_2','Payout_MVP_Bonus_3','Chain_Danger_Seconds','Use_AttacksFull_First','Only_One_Active_War','War_Checkin_Required','Min_War_Hits','Inactivity_Days_Warn','Require_Discord','Require_API_Key','Default_Training_Focus','Mobile_War_Message','Public_Recruitment_Open','Recruit_Microsite_Tagline','Promotion_Min_Score','Promotion_Core_Score','Onboarding_Default_Assignee','Onboarding_Steps','Loan_Default_Status','Revive_Default_Priority','Poll_Default_Audience'];
+  byId('settings').innerHTML = `
+    <div class="card"><h3>Quick settings</h3><p class="muted">Admin_Token cannot be changed here. Keep webhooks private.</p>
+      ${keys.map(k=>`<label>${esc(k)}</label><input class="settingInput" data-key="${esc(k)}" value="${esc(settings[k] ?? '')}">`).join('')}
+      <button onclick="saveSettingsBulk()">Save Settings</button>
+    </div>`;
+}
+
+function renderAdmin() {
+  const d = state.data || {}, settings = d.settings || {};
+  byId('admin').innerHTML = `
+    <div class="card">
+      <h3>Admin controls</h3>
+      <div class="actions">
+        <button onclick="manualSync()">Manual Full Sync</button>
+        <button onclick="recalcPayouts()">Recalculate Payouts</button>
+        <button onclick="installTriggers()">Install Sync Triggers</button>
+        <button onclick="deleteMyKey()">Delete My Stored Key</button>
+      </div>
+      <div class="warnbox">After replacing files in Apps Script, run <b>setupShadowCoreHQ</b> once from the editor or the Sheet menu so new default settings are added.</div>
+      <label>Faction leader API key</label>
+      <input id="leaderKeyInput" placeholder="Stores in Apps Script Properties, not the sheet">
+      <button onclick="storeLeaderKey()">Store Leader Key</button>
+      <h3>Safe settings</h3>${renderObject(settings)}
+      <h3>Recent errors</h3>${table(d.errors || [], ['Timestamp','Source','Message','Payload'])}
+      <h3>Member API/status fields</h3>${table(d.memberStatuses || [], ['Name','Status','Last_Action','Life','Energy','Nerve','Happy','Hospital_Until','Jail','Travel','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}
+      <h3>Recent audit</h3>${table(d.audit || [], ['Timestamp','User','Action','Details'])}
+    </div>`;
+}
+
+
+function renderV13Treasury() {
+  const d = state.data || {}, rows = d.bankLedger || [], reports = d.treasuryReports || [], latest = reports.slice(-1)[0];
+  const sum = latest ? {inflow:latest.Inflow,outflow:latest.Outflow,net:latest.Net,openLoans:latest.Open_Loans,unpaidPayouts:latest.Unpaid_Payouts} : {};
+  byId('treasury').innerHTML = `
+    <div class="grid four">${kpi('Inflow', money(sum.inflow||0))}${kpi('Outflow', money(sum.outflow||0))}${kpi('Net', money(sum.net||0))}${kpi('Unpaid payouts', money(sum.unpaidPayouts||0))}</div>
+    <div class="grid two">
+      <div class="card"><h3>Faction Bank / Treasurer Entry</h3><div class="inline"><div><label>Torn ID</label><input id="bankTornId"></div><div><label>Name</label><input id="bankName"></div><div><label>Type</label><input id="bankType" placeholder="Donation / Payout / Expense"></div><div><label>Direction</label><select id="bankDirection"><option>In</option><option>Out</option></select></div></div><div class="inline"><div><label>Amount</label><input id="bankAmount" type="number"></div><div><label>Item</label><input id="bankItem"></div><div><label>Quantity</label><input id="bankQty" type="number"></div><div><label>Status</label><input id="bankStatus" value="Open"></div></div><label>Related ID / notes</label><textarea id="bankNotes"></textarea><button onclick="saveBankEntry()">Save Bank Entry</button><button class="secondary" onclick="generateTreasuryReport()">Generate Treasury Report</button></div>
+      <div class="card"><h3>Latest Treasury Report</h3>${latest ? renderObject(latest) : '<p class="muted">No treasury report yet.</p>'}</div>
+    </div>
+    <div class="card"><h3>Bank Ledger</h3>${table(rows.slice().reverse(), ['Entry_ID','Timestamp','Name','Type','Direction','Amount','Item','Quantity','Status','Logged_By','Notes'])}</div>
+    <div class="card"><h3>Treasury Reports</h3>${table(reports.slice().reverse(), ['Timestamp','Period','Inflow','Outflow','Net','Open_Loans','Unpaid_Payouts','Body','BBCode'])}</div>`;
+}
+
+function renderV13Loans() {
+  const d = state.data || {}, rows = d.loans || d.myLoans || [];
+  byId('loans').innerHTML = `
+    <div class="grid two">
+      <div class="card"><h3>Loan + Collateral Request / Entry</h3><div class="inline"><div><label>Torn ID</label><input id="loanTornId"></div><div><label>Name</label><input id="loanName"></div><div><label>Principal</label><input id="loanPrincipal" type="number"></div><div><label>Due date</label><input id="loanDue"></div></div><div class="inline"><div><label>Item</label><input id="loanItem"></div><div><label>Quantity</label><input id="loanQty" type="number"></div><div><label>Collateral</label><input id="loanCollateral"></div><div><label>Collateral value</label><input id="loanCollateralValue" type="number"></div></div><label>Status</label><select id="loanStatus"><option>Requested</option><option>Approved</option><option>Active</option><option>Repaid</option><option>Denied</option><option>Closed</option></select><label>Notes</label><textarea id="loanNotes"></textarea><button onclick="saveLoan()">Officer Save Loan</button><button class="secondary" onclick="requestMyLoan()">Submit As My Request</button></div>
+      <div class="card"><h3>Update Loan Status</h3><label>Loan ID</label><input id="loanUpdateId"><label>Status</label><select id="loanUpdateStatus"><option>Approved</option><option>Active</option><option>Repaid</option><option>Denied</option><option>Closed</option></select><label>Note</label><textarea id="loanUpdateNote"></textarea><button onclick="updateLoanStatus()">Update Loan</button></div>
+    </div>
+    <div class="card"><h3>Loans and Collateral</h3>${table(rows.slice().reverse(), ['Loan_ID','Timestamp','Name','Principal','Item','Quantity','Collateral','Collateral_Value','Due_Date','Status','Approved_By','Repaid_Date','Notes'])}</div>`;
+}
+
+function renderV13Revives() {
+  const d = state.data || {}, rows = d.reviveBoard || d.myRevives || [];
+  byId('revives').innerHTML = `
+    <div class="grid two">
+      <div class="card"><h3>Revive / Hospital Support</h3><label>Priority</label><select id="revivePriority"><option>Normal</option><option>War Support</option><option>Emergency</option></select><label>Hospital until</label><input id="reviveUntil"><label>Notes</label><textarea id="reviveNotes"></textarea><button onclick="submitReviveRequest()">Request Revive / Support</button><button class="secondary" onclick="buildHospitalBoard()">Build From Hospitalized Members</button></div>
+      <div class="card"><h3>Officer Revive Case</h3><div class="inline"><div><label>Torn ID</label><input id="revTornId"></div><div><label>Name</label><input id="revName"></div><div><label>Assigned to</label><input id="revAssigned"></div><div><label>Cost</label><input id="revCost" type="number"></div></div><label>Status</label><select id="revStatus"><option>Open</option><option>Assigned</option><option>Complete</option><option>Cancelled</option></select><label>Notes</label><textarea id="revOfficerNotes"></textarea><button onclick="saveReviveCase()">Save Revive Case</button></div>
+    </div>
+    <div class="card"><h3>Revive / Hospital Board</h3>${table(rows.slice().reverse(), ['Request_ID','Timestamp','Name','Hospital_Until','Priority','Status','Assigned_To','Completed','Cost','Notes'])}</div>`;
+}
+
+function renderV13AvailabilityCalendar() {
+  const d = state.data || {}, session=d.session||{}, rows = (v22().availabilityWithOffsets || d.availabilityCalendar || []);
+  const myTz = viewerTimezone();
+  byId('availabilitycal').innerHTML = `
+    <div class="card"><h3>Member Availability Calendar</h3><p class="muted">Torn ID and name default from your login/API session. Pick a timezone so leadership can compare availability across member timezones and TCT/UTC.</p>
+      <div class="inline"><div><label>Torn ID</label><input id="availTornId" value="${esc(session.tornId||'')}" placeholder="auto from login/API"></div><div><label>Name</label><input id="availName" value="${esc(session.name||'')}" placeholder="auto from login/API"></div><div><label>Day</label><select id="availDay"><option>Any</option><option>Monday</option><option>Tuesday</option><option>Wednesday</option><option>Thursday</option><option>Friday</option><option>Saturday</option><option>Sunday</option></select></div><div><label>Window</label><input id="availWindow" placeholder="7pm-11pm"></div></div>
+      <div class="inline"><div><label>Timezone</label><select id="availTz">${timezoneOptions(myTz)}</select><small class="muted">Detected: ${esc(myTz)} ${esc(localOffsetNote(myTz))}</small></div><div><label>Role</label><input id="availRole" placeholder="Hitter / Reviver / Officer"></div><div><label>War ID</label><input id="availWarId"></div><div><label>Active</label><select id="availActive"><option>TRUE</option><option>FALSE</option></select></div></div>
+      <label>Notes</label><textarea id="availNotes"></textarea><button onclick="saveAvailabilityCalendar()">Save Availability</button></div>
+    <div class="grid two"><div class="card"><h3>Timezone comparison</h3>${table(rows.slice().reverse(), ['Name','Timezone','Timezone_Offset','Offset_From_Default','Time_Window','Start_Hour_TCT','End_Hour_TCT','Role','Updated'])}</div><div class="card"><h3>Best chain start windows from availability</h3>${table((v22().chainStartRecommendations||[]), ['Window_TCT','Duration_Hours','Avg_Members','Hitter_Slots','Reviver_Slots','Officer_Slots','Score','Member_Names'])}</div></div>
+    <div class="card"><h3>Availability Calendar</h3>${table(rows.slice().reverse(), ['Torn_ID','Name','Day_Of_Week','Time_Window','Timezone','Role','War_ID','Active','Updated','Notes'])}</div>`;
+}
+
+function renderV13Promotions() {
+  const d = state.data || {}, rows = d.promotions || [];
+  byId('promotions').innerHTML = `
+    <div class="grid two"><div class="card"><h3>Promotion / Rank Queue</h3><button onclick="generatePromotionQueue()">Generate Promotion Suggestions</button><p class="muted">Uses scorecards and thresholds from Settings.</p></div><div class="card"><h3>Manual Promotion Case</h3><div class="inline"><div><label>Torn ID</label><input id="promoTornId"></div><div><label>Name</label><input id="promoName"></div><div><label>Current rank</label><input id="promoCurrent"></div><div><label>Proposed rank</label><input id="promoProposed"></div></div><div class="inline"><div><label>Score</label><input id="promoScore" type="number"></div><div><label>Status</label><select id="promoStatus"><option>Proposed</option><option>Suggested</option><option>Approved</option><option>Denied</option></select></div><div><label>Criteria</label><input id="promoCriteria"></div><div><button onclick="savePromotion()">Save Promotion</button></div></div><label>Notes</label><textarea id="promoNotes"></textarea></div></div>
+    <div class="card"><h3>Promotion Queue</h3>${table(rows.slice().reverse(), ['Promotion_ID','Timestamp','Name','Current_Rank','Proposed_Rank','Score','Criteria_Met','Status','Proposed_By','Decision_Date','Notes'])}</div>`;
+}
+
+function renderV13Awards() {
+  const d = state.data || {}, rows = d.awards || d.myAwards || [];
+  byId('awards').innerHTML = `
+    <div class="grid two"><div class="card"><h3>Awards / Achievements</h3><button onclick="generateWeeklyAwards()">Generate Weekly Awards</button><p class="muted">Creates MVP/reliability awards from scorecards.</p></div><div class="card"><h3>Manual Award</h3><div class="inline"><div><label>Torn ID</label><input id="awardTornId"></div><div><label>Name</label><input id="awardName"></div><div><label>Award</label><input id="awardNameField"></div><div><label>Category</label><input id="awardCategory"></div></div><label>Notes</label><textarea id="awardNotes"></textarea><button onclick="saveAward()">Save Award</button></div></div>
+    <div class="card"><h3>Awards</h3>${table(rows.slice().reverse(), ['Timestamp','Name','Award','Category','Related_ID','Awarded_By','Public','Notes'])}</div>`;
+}
+
+function renderV13Onboarding() {
+  const d = state.data || {}, rows = d.onboarding || d.myOnboarding || [];
+  byId('onboarding').innerHTML = `
+    <div class="grid two"><div class="card"><h3>New Member Onboarding</h3><label>Torn ID</label><input id="onboardTornId"><label>Name</label><input id="onboardName"><button onclick="createOnboardingPlan()">Create Checklist</button></div><div class="card"><h3>Update Step</h3><label>Onboarding ID</label><input id="onboardId"><label>Status</label><select id="onboardStatus"><option>Open</option><option>In Progress</option><option>Complete</option><option>Blocked</option></select><label>Notes</label><textarea id="onboardNotes"></textarea><button onclick="updateOnboardingStep()">Update Step</button></div></div>
+    <div class="card"><h3>Onboarding Checklist</h3>${table(rows.slice().reverse(), ['Onboarding_ID','Name','Step','Status','Assigned_To','Due_Date','Completed','Updated','Notes'])}</div>`;
+}
+
+function renderV13Mentors() {
+  const d = state.data || {}, rows = d.mentorships || d.myMentorships || [];
+  byId('mentors').innerHTML = `
+    <div class="grid two"><div class="card"><h3>Mentor / Coaching Assignment</h3><div class="inline"><div><label>Mentee ID</label><input id="menteeId"></div><div><label>Mentee name</label><input id="menteeName"></div><div><label>Mentor ID</label><input id="mentorId"></div><div><label>Mentor name</label><input id="mentorName"></div></div><label>Goals</label><textarea id="mentorGoals"></textarea><button onclick="saveMentorship()">Save Mentorship</button></div><div class="card"><h3>Log Check-in</h3><label>Mentorship ID</label><input id="mentorCheckId"><label>Note</label><textarea id="mentorCheckNote"></textarea><button onclick="logMentorCheckin()">Log Check-in</button></div></div>
+    <div class="card"><h3>Mentorships</h3>${table(rows.slice().reverse(), ['Mentorship_ID','Mentee_Name','Mentor_Name','Status','Start_Date','Checkin_Frequency','Last_Checkin','Next_Checkin','Goals','Notes'])}</div>`;
+}
+
+function renderV13Knowledge() {
+  const d = state.data || {}, rows = d.knowledgeBase || d.public?.knowledgeBasePublic || [];
+  byId('knowledge').innerHTML = `
+    <div class="grid two"><div class="card"><h3>Knowledge Base Article</h3><label>Category</label><input id="kbCategory"><label>Title</label><input id="kbTitle"><label>Audience</label><select id="kbAudience"><option>Members</option><option>All</option><option>Officers</option><option>Public</option></select><label>Tags</label><input id="kbTags"><label>Content</label><textarea id="kbContent" class="large"></textarea><button onclick="saveKnowledgeArticle()">Save Article</button></div><div class="card"><h3>Search tip</h3><p class="muted">Use this for war rules, payout rules, training guides, gear guides, OC notes, leadership SOPs, and API key safety notes.</p></div></div>
+    <div class="card"><h3>Articles</h3>${table(rows.slice().reverse(), ['Category','Title','Audience','Content','Tags','Active','Updated','Updated_By'])}</div>`;
+}
+
+function renderV13KeyHealth() {
+  const d = state.data || {}, rows = d.apiKeyHealth || d.myApiKeyHealth || [];
+  byId('keyhealth').innerHTML = `<div class="card"><h3>API Key Health Center</h3><div class="actions"><button onclick="runApiKeyHealthAudit()">Run Key Health Audit</button><button class="secondary" onclick="deleteMyKey()">Delete My Stored Key</button></div><p class="muted">Flags missing keys, stale checks, unknown selections, and keys that may need permission review.</p>${table(rows.slice().reverse(), ['Timestamp','Name','Stored','Status','Last_Checked','Age_Days','Risk_Level','Missing_Selections','Recommended_Action'])}</div>`;
+}
+
+function renderV13Polls() {
+  const d = state.data || {}, rows = d.polls || d.activePolls || [], active = d.activePolls || [];
+  const voteHtml = active.map(p=>`<div class="card"><h3>${esc(p.Title)}</h3><p>${esc(p.Description||'')}</p><p class="muted">Your vote: ${esc(p.My_Vote||'Not voted')}</p><div class="actions">${String(p.Options||'').split('|').filter(Boolean).map(o=>`<button class="secondary" onclick="votePoll('${esc(p.Poll_ID)}','${esc(o)}')">${esc(o)}</button>`).join('')}</div><pre class="codebox">${esc(p.Results_JSON||'{}')}</pre></div>`).join('');
+  byId('polls').innerHTML = `
+    <div class="grid two"><div class="card"><h3>Create Poll</h3><label>Title</label><input id="pollTitle"><label>Description</label><textarea id="pollDesc"></textarea><label>Options, one per line</label><textarea id="pollOptions" placeholder="Option A\nOption B"></textarea><label>Audience</label><input id="pollAudience" value="Members"><button onclick="createPoll()">Create Poll</button></div><div class="card"><h3>Active Polls / Vote</h3>${voteHtml || '<p class="muted">No active polls.</p>'}</div></div>
+    <div class="card"><h3>Polls</h3>${table(rows.slice().reverse(), ['Poll_ID','Title','Description','Options','Audience','Status','Created','Closes','Created_By','Results_JSON'])}</div>`;
+}
+
+function renderV13MyLife() {
+  const d = state.data || {};
+  const session = activeSession_() || d.session || {};
+  const life = d.myFactionLife || {};
+  const direct = d.v2612MyData || {};
+  const identity = Object.assign({}, direct.identity || {}, life.member || {}, {
+    Torn_ID: (life.member && life.member.Torn_ID) || (direct.identity && direct.identity.Torn_ID) || session.tornId || '',
+    Name: (life.member && life.member.Name) || (direct.identity && direct.identity.Name) || session.name || '',
+    Role: (life.member && life.member.Role) || (direct.identity && direct.identity.Role) || session.role || '',
+    Session_Source: session.apiLogin ? 'API login' : (session.adminToken ? 'Admin token' : (session.memberTokenLogin ? 'Member token' : 'Session'))
+  });
+  const status = life.status || d.myStatus || direct.status || {};
+  const scorecard = life.scorecard || d.myScorecard || direct.scorecard || {};
+  const hasIdentity = identity.Torn_ID || identity.Name;
+  byId('mylife').innerHTML = `
+    <div class="card"><h3>My Faction Life</h3><p class="muted">Everything relevant to your faction life in one place. If this page has only your identity, run a sync or install/enable scanner/API snapshots so status fields can fill.</p>${hasIdentity ? renderObject(identity) : '<p class="warnbox">You are logged in, but no Torn identity was returned for this session. Log out, clear site data, then log in with your API key again.</p>'}</div>
+    <div class="card"><h3>Summary</h3>${renderObject(life.summary || {Note:'No faction-life records found yet. This is normal until payouts, requests, scanner snapshots, onboarding, or training rows exist for your Torn ID.'})}</div>
+    <div class="grid two"><div class="card"><h3>Status</h3>${renderObject(status)}</div><div class="card"><h3>Scorecard</h3>${renderObject(scorecard)}</div></div>
+    <div class="grid two"><div class="card"><h3>Payouts</h3>${table(life.payouts || d.myPayouts || direct.payouts || [], ['War_ID','Name','Hits','Respect','Total','Paid','Paid_Date'])}</div><div class="card"><h3>Loans</h3>${table(life.loans || d.myLoans || direct.loans || [], ['Loan_ID','Principal','Collateral','Due_Date','Status','Notes'])}</div></div>
+    <div class="grid two"><div class="card"><h3>Awards</h3>${table(life.awards || d.myAwards || direct.awards || [], ['Timestamp','Award','Category','Awarded_By','Notes'])}</div><div class="card"><h3>Onboarding</h3>${table(life.onboarding || d.myOnboarding || direct.onboarding || [], ['Step','Status','Assigned_To','Completed','Notes'])}</div></div>
+    <div class="grid two"><div class="card"><h3>Mentor / Coaching</h3>${table(life.mentors || d.myMentorships || direct.mentors || [], ['Mentee_Name','Mentor_Name','Status','Last_Checkin','Goals','Notes'])}</div><div class="card"><h3>API Health</h3>${renderObject(life.apiHealth || d.myApiKeyHealth || direct.apiHealth || {})}</div></div>
+    <div class="card"><h3>Direct member data bridge</h3>${direct && Object.keys(direct).length ? renderObject(direct.counts || {}) : '<p class="muted">Direct bridge did not return data yet.</p>'}<button class="secondary" onclick="debugMyDataV2612()">Debug My Data</button></div>
+    <div class="card"><h3>Data troubleshooting</h3><p class="muted">This page matches records by Torn_ID. If your identity shows but sections are empty, the site is working; you just do not have matching rows yet in those modules. Check Members, Member_Status, API_Key_Health, Payouts, Awards, Onboarding, Training_Tracker, and scanner readiness snapshots for your Torn ID.</p><button onclick="loadPageDataV26('mylife')">Refresh My Data</button><button class="secondary" onclick="showPage('scannerinstall',true)">Scanner Setup</button></div>`;
+}
+
+function renderV13Microsite() {
+  const d = state.data || {}, rows = d.recruitMicrosite || d.public?.recruitMicrosite || [];
+  const preview = rows.slice().sort((a,b)=>Number(a.Sort)-Number(b.Sort)).map(sec=>`<div class="card"><h2>${esc(sec.Title)}</h2><p style="white-space:pre-wrap">${esc(sec.Content)}</p>${sec.Button_Text?`<span class="pill">${esc(sec.Button_Text)} → ${esc(sec.Button_URL)}</span>`:''}</div>`).join('');
+  byId('microsite').innerHTML = `
+    <div class="card"><h3>Public Recruitment Microsite Preview</h3>${preview || '<p class="muted">No microsite sections yet.</p>'}</div>
+    <div class="card"><h3>Edit Microsite Section</h3><div class="inline"><div><label>Section ID</label><input id="siteSectionId"></div><div><label>Sort</label><input id="siteSort" type="number" value="50"></div><div><label>Title</label><input id="siteTitle"></div><div><label>Active</label><select id="siteActive"><option>TRUE</option><option>FALSE</option></select></div></div><label>Content</label><textarea id="siteContent" class="large"></textarea><div class="inline"><div><label>Button text</label><input id="siteButtonText"></div><div><label>Button URL</label><input id="siteButtonUrl"></div><div><button onclick="saveMicrositeSection()">Save Section</button></div></div></div>`;
+}
+
+
+function renderV12BattlePlan() {
+  const d = state.data || {}, plans = d.battlePlans || [];
+  const latest = plans.slice(-1)[0];
+  byId('battleplan').innerHTML = `
+    <div class="grid two">
+      <div class="card"><h3>War Battle Plan Generator</h3><p class="muted">Creates a phase plan, safe target priorities, assigned openers, risk notes, and chain advice.</p><button onclick="generateBattlePlan()">Generate Battle Plan</button><button class="secondary" onclick="runOptimizer()">Refresh Target Optimizer</button></div>
+      <div class="card"><h3>Latest Plan</h3>${latest ? renderObject(latest) : '<p class="muted">No battle plan generated yet.</p>'}</div>
+    </div>
+    <div class="card"><h3>Battle Plan History</h3>${table(plans.slice().reverse(), ['Timestamp','War_ID','Phase','Summary','Risk_Notes','Chain_Advice','Status'])}</div>`;
+}
+
+function renderV12Commitments() {
+  const d = state.data || {}, rows = d.warCommitments || [];
+  byId('commitments').innerHTML = `
+    <div class="grid two">
+      <div class="card"><h3>My War Contract / Check-in</h3><label>Available?</label><select id="commitAvailable"><option>TRUE</option><option>FALSE</option></select><label>Time windows</label><input id="commitWindows" placeholder="Evening, late night, weekend"><label>Can hit?</label><select id="commitHit"><option>TRUE</option><option>FALSE</option></select><label>Can chain?</label><select id="commitChain"><option>TRUE</option><option>FALSE</option></select><label>Timezone</label><input id="commitTz" placeholder="America/New_York"><label>Notes</label><textarea id="commitNotes"></textarea><button onclick="submitCommitment()">Submit Commitment</button></div>
+      <div class="card"><h3>Commitment Summary</h3>${kpi('Checked in', rows.length)}<p class="muted">Leaders can use this for war planning and discipline recommendations.</p></div>
+    </div>
+    <div class="card"><h3>War Commitments</h3>${table(rows.slice().reverse(), ['War_ID','Name','Available','Time_Windows','Can_Hit','Can_Chain','Notes','Timestamp'])}</div>`;
+}
+
+function renderV12StrikeTeams() {
+  const d = state.data || {}, rows = d.strikeTeams || [];
+  byId('strike').innerHTML = `<div class="card"><h3>Strike Team Builder</h3><p class="muted">Auto-groups members into Alpha, Bravo, Ghost, Medic, and Recruit teams from readiness/scorecards.</p><button onclick="buildStrikeTeams()">Build Strike Teams</button></div><div class="card"><h3>Strike Teams</h3>${table(rows, ['War_ID','Team_Name','Captain_Name','Name','Role','Status','Notes','Updated'])}</div>`;
+}
+
+function renderV12Vetting() {
+  const d = state.data || {}, apps = d.applications || [], rows = d.applicantVetting || [];
+  byId('vetting').innerHTML = `<div class="grid two"><div class="card"><h3>Applicant Vetting</h3><label>Application ID</label><input id="vetAppId" placeholder="APP-XXXX"><button onclick="vetApplicant()">Run Vetting</button><p class="muted">Creates red flags, strengths, and a trial/accept/deny recommendation.</p></div><div class="card"><h3>Applications</h3>${table(apps.slice().reverse(), ['Application_ID','Name','Level','Age_Days','Activity','War_Availability','Discord','API_Verified','Score','Status'])}</div></div><div class="card"><h3>Vetting Board</h3>${table(rows.slice().reverse(), ['Application_ID','Name','Score','Red_Flags','Strengths','Recommendation','Reviewed_By','Updated'])}</div>`;
+}
+
+function renderV12Training() {
+  const d = state.data || {}, rows = d.trainingTracker || d.myTraining || [];
+  byId('training').innerHTML = `<div class="grid two"><div class="card"><h3>Training & Growth Tracker</h3><label>Goal</label><input id="trainGoal" placeholder="Example: 1m total stats"><label>Current estimate</label><input id="trainCurrent"><label>Target estimate</label><input id="trainTarget"><label>Focus</label><input id="trainFocus" placeholder="speed/defense/balanced"><label>Notes</label><textarea id="trainNotes"></textarea><button onclick="saveTrainingGoal()">Save Training Goal</button></div><div class="card"><h3>My Training Rows</h3>${table(d.myTraining || [], ['Goal','Current_Estimate','Target_Estimate','Focus','Plan','Updated'])}</div></div><div class="card"><h3>Faction Training Tracker</h3>${table(rows, ['Name','Goal','Current_Estimate','Target_Estimate','Focus','Plan','Updated','Notes'])}</div>`;
+}
+
+function renderV12ChainPlan() {
+  const d = state.data || {}, rows = d.chainPlans || [], recs=(v22().chainStartRecommendations||[]);
+  byId('chainplan').innerHTML = `<div class="card"><h3>Chain Bonus Planner</h3><p class="muted">Plans pacing, bonus hit reservations, and best start windows using Availability Calendar member timezones/time windows converted to Torn time/TCT.</p><button onclick="generateChainPlan()">Generate Chain Plan</button></div><div class="card"><h3>Best start windows from availability</h3>${table(recs, ['Window_TCT','Duration_Hours','Avg_Members','Hitter_Slots','Reviver_Slots','Officer_Slots','Score','Member_Names'])}</div><div class="card"><h3>Chain Plans</h3>${table(rows.slice().reverse(), ['Timestamp','War_ID','Current_Chain','Next_Bonus','Hits_Needed','Pacing_Plan','Reserved_Bonus_Hitter','Danger_Level','Notes'])}</div>`;
+}
+
+function renderV12Economy() {
+  const d = state.data || {}, rows = d.economyLedger || [];
+  const inflow = rows.filter(r=>String(r.Direction).toLowerCase()==='in').reduce((s,r)=>s+Number(r.Amount||0),0);
+  const outflow = rows.filter(r=>String(r.Direction).toLowerCase()!=='in').reduce((s,r)=>s+Number(r.Amount||0),0);
+  byId('economy').innerHTML = `<div class="grid four">${kpi('Inflow', money(inflow), 'status-ok')}${kpi('Outflow', money(outflow), 'status-warn')}${kpi('Net', money(inflow-outflow))}${kpi('Entries', rows.length)}</div><div class="card"><h3>Add Economy Entry</h3><div class="inline"><div><label>Torn ID</label><input id="ecoTornId"></div><div><label>Name</label><input id="ecoName"></div><div><label>Category</label><input id="ecoCategory" placeholder="Loan, donation, payout, prize"></div><div><label>Direction</label><select id="ecoDirection"><option>Out</option><option>In</option></select></div></div><div class="inline"><div><label>Amount</label><input id="ecoAmount"></div><div><label>Item</label><input id="ecoItem"></div><div><label>Quantity</label><input id="ecoQty"></div><div><label>Status</label><input id="ecoStatus" value="Open"></div></div><label>Notes</label><textarea id="ecoNotes"></textarea><button onclick="saveEconomyEntry()">Save Economy Entry</button></div><div class="card"><h3>Economy Ledger</h3>${table(rows.slice().reverse(), ['Timestamp','Name','Category','Direction','Amount','Item','Quantity','Status','Logged_By','Notes'])}</div>`;
+}
+
+function renderV12Discipline() {
+  const d = state.data || {}, rows = d.discipline || [];
+  byId('discipline').innerHTML = `<div class="grid two"><div class="card"><h3>Log Discipline / Accountability Case</h3><label>Torn ID</label><input id="discTornId"><label>Name</label><input id="discName"><label>Issue type</label><input id="discIssue" placeholder="Missed war, ignored assignment"><label>Severity</label><select id="discSeverity"><option>Low</option><option>Medium</option><option>High</option></select><label>Recommended action</label><input id="discAction"><label>Notes</label><textarea id="discNotes"></textarea><button onclick="logDisciplineCase()">Log Case</button></div><div class="card"><h3>Auto Recommendations</h3><p class="muted">Uses scorecards, active war check-ins, and war activity.</p><button onclick="generateDisciplineRecs()">Generate Recommendations</button></div></div><div class="card"><h3>Discipline Log</h3>${table(rows.slice().reverse(), ['Timestamp','Name','Issue_Type','Severity','Status','Action_Recommended','Logged_By','Notes'])}</div>`;
+}
+
+function renderV12Tasks() {
+  const d = state.data || {}, rows = d.officerTasks || [];
+  byId('tasks').innerHTML = `<div class="card"><h3>Officer Task Board</h3><div class="inline"><div><label>Title</label><input id="taskTitle"></div><div><label>Assigned To</label><input id="taskAssigned"></div><div><label>Due Date</label><input id="taskDue"></div><div><label>Priority</label><select id="taskPriority"><option>High</option><option>Medium</option><option>Low</option></select></div></div><label>Notes</label><textarea id="taskNotes"></textarea><button onclick="saveOfficerTask()">Save Task</button></div><div class="card"><h3>Tasks</h3>${table(rows.slice().reverse(), ['Task_ID','Created','Title','Assigned_To','Due_Date','Priority','Status','Completed','Notes'])}</div>`;
+}
+
+function renderV12RuleChecks() {
+  const d = state.data || {}, rows = d.ruleChecks || [];
+  byId('rulescheck').innerHTML = `<div class="card"><h3>Faction Rule Enforcement</h3><p class="muted">Checks Discord, API key, war check-in, and scorecard activity rules.</p><button onclick="evaluateRuleCompliance()">Evaluate Rule Compliance</button></div><div class="card"><h3>Rule Checks</h3>${table(rows.slice().reverse(), ['Name','Rule','Status','Evidence','Recommended_Action','Timestamp'])}</div>`;
+}
+
+function renderV12HtmlCodeEditor() {
+  const d = state.data || {}, v23 = d.v23 || {};
+  const rows = (d.htmlSnippets || v23.snippets || []).slice();
+  const latest = rows.slice(-1)[0] || {};
+  const latestHtml = latest.HTML || '<h2>ShadowCore HQ</h2><p>Generate or paste HTML here, then copy it for Torn.</p>';
+  const latestPlain = latest.Plain_Text || '';
+  byId('bbcode').innerHTML = `
+    <div class="grid two">
+      <div class="card">
+        <h3>Torn HTML Code Copier / Editor</h3>
+        <p class="muted">Torn now uses HTML-style formatting instead of old BBCode. Generate a template, edit the HTML, preview it, then copy the code.</p>
+        <label>Template</label>
+        <select id="htmlType">
+          <option>Recruitment</option>
+          <option>War Report</option>
+          <option>Payout Report</option>
+          <option>Rules</option>
+          <option>Chain Plan</option>
+          <option>Announcement</option>
+          <option>Custom</option>
+        </select>
+        <label>Title</label><input id="htmlTitle" placeholder="Optional title" value="${esc(latest.Title || '')}">
+        <label>Source / War ID</label><input id="htmlSource" placeholder="Optional source/war ID" value="${esc(latest.Source_ID || '')}">
+        <div class="actions">
+          <button onclick="generateHtmlSnippet()">Generate HTML</button>
+          <button class="secondary" onclick="saveHtmlSnippet()">Save Edited HTML</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Copy Tools</h3>
+        <p class="muted">Copy HTML for Torn posts, or copy plain text for Discord/notes.</p>
+        <div class="actions">
+          <button onclick="copyHtmlEditorCode()">Copy HTML</button>
+          <button class="secondary" onclick="copyHtmlEditorPlain()">Copy Plain Text</button>
+          <button class="secondary" onclick="updateHtmlEditorPreview()">Refresh Preview</button>
+        </div>
+        <label>Plain text fallback</label>
+        <textarea id="htmlPlain" rows="8" placeholder="Plain text fallback">${esc(latestPlain)}</textarea>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <h3>HTML Editor</h3>
+        <textarea id="htmlEditor" rows="18" spellcheck="false" oninput="updateHtmlEditorPreview()">${esc(latestHtml)}</textarea>
+      </div>
+      <div class="card">
+        <h3>Live Preview</h3>
+        <iframe id="htmlPreviewFrame" class="html-preview" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>
+      </div>
+    </div>
+    <div class="card"><h3>HTML Snippet History</h3>${table(rows.slice().reverse(), ['Timestamp','Type','Title','HTML','Plain_Text','Source_ID','Created_By'])}</div>
+    <div class="card"><h3>Old BBCode Archive</h3><p class="muted">Old BBCode snippets are kept only as an archive. Use the HTML editor above for new Torn posts.</p>${table((d.bbcodeSnippets || []).slice().reverse(), ['Timestamp','Type','Title','BBCode','Created_By'])}</div>`;
+  setTimeout(updateHtmlEditorPreview, 0);
+}
+
+function updateHtmlEditorPreview(){
+  const editor = byId('htmlEditor');
+  const frame = byId('htmlPreviewFrame');
+  if (!editor || !frame) return;
+  const doc = frame.contentDocument || frame.contentWindow?.document;
+  if (!doc) return;
+  doc.open();
+  doc.write(`<!doctype html><html><head><base target="_blank"><style>body{font-family:Arial,sans-serif;background:#0b0f14;color:#e5e7eb;padding:16px;line-height:1.45}a{color:#f59e0b}table{border-collapse:collapse;width:100%}td,th{border:1px solid #374151;padding:6px}pre{white-space:pre-wrap;background:#111827;padding:10px;border-radius:8px}</style></head><body>${editor.value || ''}</body></html>`);
+  doc.close();
+}
+
+async function copyHtmlEditorCode(){
+  const text = val('htmlEditor');
+  try { await navigator.clipboard.writeText(text); toast('HTML copied.'); }
+  catch(err){ console.log(text); toast('Clipboard blocked. HTML printed in console.', true); }
+}
+
+async function copyHtmlEditorPlain(){
+  const text = val('htmlPlain') || stripHtmlClient_(val('htmlEditor'));
+  try { await navigator.clipboard.writeText(text); toast('Plain text copied.'); }
+  catch(err){ console.log(text); toast('Clipboard blocked. Plain text printed in console.', true); }
+}
+
+function stripHtmlClient_(html){
+  const div = document.createElement('div');
+  div.innerHTML = html || '';
+  return div.textContent || div.innerText || '';
+}
+
+
+function renderV12SelfService() {
+  const d = state.data || {};
+  byId('selfservice').innerHTML = `<div class="grid two"><div class="card"><h3>Member Self-Service</h3><label>Discord name</label><input id="selfDiscord" placeholder="Update Discord"><label>Notes</label><textarea id="selfNotes" placeholder="Anything leadership should know"></textarea><button onclick="updateSelfService()">Update Profile</button></div><div class="card"><h3>My Assignments</h3>${table(d.myAssignments || [], ['War_ID','Enemy_Name','Status','Priority','Score','Notes','Updated'])}</div></div><div class="grid two"><div class="card"><h3>My Availability</h3>${table(d.myAvailability || [], ['War_ID','Time_Windows','Timezone','Discord','Notes','Updated'])}</div><div class="card"><h3>My Pay Stubs</h3>${table(d.myPayouts || [], ['War_ID','Hits','Respect','Total','Paid','Paid_Date','Notes'])}</div></div>`;
+}
+
+function renderV12Mobile() {
+  const d = state.data || {}, m = d.mobileWarView || {}, a = m.assignment || null, chain = m.chain || {};
+  byId('mobile').innerHTML = `<div class="mobile-card card"><h2>ShadowCore War Quick View</h2><p>${esc(m.message || '')}</p>${a ? `<div class="kpi"><span>Your target</span><b>${esc(a.Enemy_Name)}</b></div><p>Priority: <b>${esc(a.Priority)}</b> · Status: <b>${esc(a.Status)}</b></p><p>${esc(a.Notes || '')}</p><a href="${esc(m.quickLinks?.targetProfile || '#')}" target="_blank"><button>Open Torn Profile</button></a>` : '<p class="muted">No assignment found.</p>'}<div class="grid two"><div>${kpi('Chain', chain.Chain || 0)}</div><div>${kpi('Next Bonus', chain.Next_Bonus || '')}</div></div><button class="secondary" onclick="loadState()">Refresh Mobile View</button></div>`;
+}
+
+async function submitRequest(){try{await gas('submitArmoryRequest',state.sessionId,{type:val('reqType'),item:val('reqItem'),quantity:val('reqQty'),urgency:val('reqUrgency'),reason:val('reqReason')});toast('Request submitted.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function reviewRequest(){try{await gas('reviewArmoryRequest',state.sessionId,val('reviewReqId'),val('reviewReqStatus'),val('reviewReqNotes'));toast('Request reviewed.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function submitApplication(){try{await gas('submitApplication',{tornId:val('appTornId'),name:val('appName'),level:val('appLevel'),ageDays:val('appAge'),battleStats:val('appStats'),activity:val('appActivity'),availability:val('appAvail'),discord:val('appDiscord'),previousFaction:val('appPrev'),notes:val('appNotes')});toast('Application submitted.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function reviewApp(){try{await gas('reviewApplication',state.sessionId,val('reviewAppId'),val('reviewAppStatus'),val('reviewAppNote'));toast('Application reviewed.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function manualSync(){try{const r=await gas('manualSyncFromWeb',state.sessionId);toast('Sync complete.');console.log(r);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function recalcPayouts(){try{const r=await gas('recalcPayoutsFromWeb',state.sessionId,'');toast(`Payouts calculated: ${money(r.total||0)}`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function storeLeaderKey(){try{await gas('storeFactionLeaderKeyFromWeb',state.sessionId,val('leaderKeyInput'));toast('Leader key stored.');}catch(err){toast(err.message||String(err),true);}}
+async function deleteMyKey(){try{await gas('deleteMyKey',state.sessionId);toast('Stored member key deleted.');}catch(err){toast(err.message||String(err),true);}}
+async function saveWar(){try{await gas('createOrUpdateWarFromWeb',state.sessionId,{warId:val('warId'),enemyFactionId:val('warEnemyId'),enemyName:val('warEnemyName'),status:val('warStatus'),notes:val('warNotes')});toast('War saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function endActiveWar(){try{await gas('endActiveWarFromWeb',state.sessionId,'Ended from web UI');toast('Active war ended and report generated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function bulkImportEnemies(){try{const r=await gas('bulkImportEnemiesFromWeb',state.sessionId,val('enemyBulk'));toast(`Imported ${r.imported} enemies.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveTargetUpdate(){try{await gas('updateTargetFromWeb',state.sessionId,val('targetId'),{Status:val('targetStatus'),Priority:val('targetPriority'),Notes:val('targetNotes')});toast('Target updated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function assignTarget(){try{await gas('assignTargetFromWeb',state.sessionId,val('targetId'),val('assignTornId'));toast('Target assigned.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function runOptimizer(){try{const r=await gas('runTargetOptimizerFromWeb',state.sessionId);toast(`Optimizer created/updated ${r.targets||0} targets.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function markPaid(){try{await gas('markPayoutPaidFromWeb',state.sessionId,val('paidKey'),val('paidNote'));toast('Payout marked paid.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateReport(){try{const r=await gas('generateReportFromWeb',state.sessionId,'');toast('Report generated: '+r.title);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function exportPayoutCsv(){try{const r=await gas('exportPayoutCsvFromWeb',state.sessionId,'');navigator.clipboard?.writeText(r.csv);toast('CSV text copied to clipboard if browser allowed it.');console.log(r.filename, r.csv);}catch(err){toast(err.message||String(err),true);}}
+async function saveOc(){try{await gas('saveOcPlan',state.sessionId,{crime:val('ocCrime'),plannedTime:val('ocTime'),slot:val('ocSlot'),tornId:val('ocTornId'),name:val('ocName'),role:val('ocRole'),Status:val('ocStatus'),notes:val('ocNotes')});toast('OC row saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveEnemy(){try{await gas('saveEnemyPlayer',state.sessionId,{enemyId:val('enemyId'),name:val('enemyName'),factionId:val('enemyFaction'),level:val('enemyLevel'),status:val('enemyStatus'),Good_Target:val('enemyGood'),Avoid:val('enemyAvoid'),notes:val('enemyNotes')});toast('Enemy saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveEnemyFaction(){try{await gas('saveEnemyFactionProfileFromWeb',state.sessionId,{factionId:val('enemyFactionId2'),name:val('enemyFactionName2'),warRecord:val('enemyWarRecord'),timezonePattern:val('enemyTzPattern'),strengthNotes:val('enemyStrengths'),weaknessNotes:val('enemyWeaknesses')});toast('Enemy faction profile saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveAnnouncement(){try{await gas('saveAnnouncementFromWeb',state.sessionId,{title:val('annTitle'),message:val('annMessage'),audience:val('annAudience'),active:'TRUE'});toast('Announcement saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveEvent(){try{await gas('saveEventFromWeb',state.sessionId,{title:val('evTitle'),type:val('evType'),startTime:val('evStart'),endTime:val('evEnd'),description:val('evDesc'),status:'Planned'});toast('Event saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function sendDiscordNotice(){try{await gas('sendDiscordNoticeFromWeb',state.sessionId,val('discordChannel'),val('discordMsg'));toast('Discord notice sent or skipped based on settings.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function sendDiscordEmbed(){try{await gas('sendDiscordEmbedFromWeb',state.sessionId,val('embedChannel'),val('embedTitle'),val('embedDesc'),val('embedFields'));toast('Discord embed sent or skipped based on settings.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveSettingsBulk(){try{const pairs=[...document.querySelectorAll('.settingInput')].map(el=>({key:el.dataset.key,value:el.value}));const r=await gas('saveSettingBulkFromWeb',state.sessionId,pairs);toast(`Saved ${r.changed} setting(s).`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function installTriggers(){try{await gas('installTriggersFromWeb',state.sessionId);toast('Triggers installed.');}catch(err){toast(err.message||String(err),true);}}
+
+
+async function generateBattlePlan(){try{const r=await gas('generateWarBattlePlanFromWeb',state.sessionId,'');toast('Battle plan generated.');console.log(r);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function submitCommitment(){try{await gas('submitWarCommitmentFromWeb',state.sessionId,{available:val('commitAvailable'),timeWindows:val('commitWindows'),canHit:val('commitHit'),canChain:val('commitChain'),timezone:val('commitTz'),notes:val('commitNotes')});toast('War commitment submitted.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function buildStrikeTeams(){try{const r=await gas('buildStrikeTeamsFromWeb',state.sessionId,'');toast(`Built ${r.rows||0} strike team rows.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function vetApplicant(){try{await gas('vetApplicantFromWeb',state.sessionId,val('vetAppId'));toast('Applicant vetting complete.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveTrainingGoal(){try{await gas('saveTrainingGoalFromWeb',state.sessionId,{goal:val('trainGoal'),currentEstimate:val('trainCurrent'),targetEstimate:val('trainTarget'),focus:val('trainFocus'),notes:val('trainNotes')});toast('Training goal saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateChainPlan(){try{await gas('generateChainPlanFromWeb',state.sessionId,'');toast('Chain plan generated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveEconomyEntry(){try{await gas('saveEconomyEntryFromWeb',state.sessionId,{tornId:val('ecoTornId'),name:val('ecoName'),category:val('ecoCategory'),direction:val('ecoDirection'),amount:val('ecoAmount'),item:val('ecoItem'),quantity:val('ecoQty'),status:val('ecoStatus'),notes:val('ecoNotes')});toast('Economy entry saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function logDisciplineCase(){try{await gas('logDisciplineCaseFromWeb',state.sessionId,{tornId:val('discTornId'),name:val('discName'),issueType:val('discIssue'),severity:val('discSeverity'),action:val('discAction'),notes:val('discNotes')});toast('Discipline case logged.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateDisciplineRecs(){try{const r=await gas('generateDisciplineRecommendationsFromWeb',state.sessionId);toast(`Created/updated ${r.created||0} recommendations.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveOfficerTask(){try{await gas('saveOfficerTaskFromWeb',state.sessionId,{title:val('taskTitle'),assignedTo:val('taskAssigned'),dueDate:val('taskDue'),priority:val('taskPriority'),notes:val('taskNotes')});toast('Task saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function evaluateRuleCompliance(){try{const r=await gas('evaluateRuleComplianceFromWeb',state.sessionId);toast(`Checked ${r.checks||0} rule items.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateHtmlSnippet(){try{await gas('generateHtmlSnippetFromWeb',state.sessionId,val('htmlType'),val('htmlTitle'),val('htmlSource'));toast('HTML generated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveHtmlSnippet(){try{await gas('saveHtmlSnippetFromWeb',state.sessionId,val('htmlType')||'Custom',val('htmlTitle')||'Edited HTML',val('htmlEditor'),val('htmlPlain'),val('htmlSource'));toast('HTML saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateBBCodeSnippet(){return generateHtmlSnippet();}
+async function updateSelfService(){try{await gas('updateSelfServiceProfileFromWeb',state.sessionId,{discord:val('selfDiscord'),notes:val('selfNotes')});toast('Profile updated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+
+
+async function saveBankEntry(){try{await gas('saveBankEntryFromWeb',state.sessionId,{tornId:val('bankTornId'),name:val('bankName'),type:val('bankType'),direction:val('bankDirection'),amount:val('bankAmount'),item:val('bankItem'),quantity:val('bankQty'),status:val('bankStatus'),notes:val('bankNotes')});toast('Bank entry saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateTreasuryReport(){try{await gas('generateTreasuryReportFromWeb',state.sessionId);toast('Treasury report generated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveLoan(){try{await gas('saveLoanFromWeb',state.sessionId,{tornId:val('loanTornId'),name:val('loanName'),principal:val('loanPrincipal'),item:val('loanItem'),quantity:val('loanQty'),collateral:val('loanCollateral'),collateralValue:val('loanCollateralValue'),dueDate:val('loanDue'),status:val('loanStatus'),notes:val('loanNotes')});toast('Loan saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function requestMyLoan(){try{await gas('requestLoanFromWeb',state.sessionId,{principal:val('loanPrincipal'),item:val('loanItem'),quantity:val('loanQty'),collateral:val('loanCollateral'),collateralValue:val('loanCollateralValue'),dueDate:val('loanDue'),notes:val('loanNotes')});toast('Loan request submitted.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function updateLoanStatus(){try{await gas('updateLoanStatusFromWeb',state.sessionId,val('loanUpdateId'),val('loanUpdateStatus'),val('loanUpdateNote'));toast('Loan updated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function submitReviveRequest(){try{await gas('submitReviveRequestFromWeb',state.sessionId,{priority:val('revivePriority'),hospitalUntil:val('reviveUntil'),notes:val('reviveNotes')});toast('Revive/support request submitted.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveReviveCase(){try{await gas('saveReviveCaseFromWeb',state.sessionId,{tornId:val('revTornId'),name:val('revName'),assignedTo:val('revAssigned'),cost:val('revCost'),status:val('revStatus'),notes:val('revOfficerNotes')});toast('Revive case saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function buildHospitalBoard(){try{const r=await gas('buildHospitalSupportBoardFromWeb',state.sessionId);toast(`Created/updated ${r.added||0} hospital support rows.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveAvailabilityCalendar(){try{await gas('saveAvailabilityCalendarFromWeb',state.sessionId,{tornId:val('availTornId'),name:val('availName'),day:val('availDay'),window:val('availWindow'),timezone:val('availTz'),role:val('availRole'),warId:val('availWarId'),active:val('availActive'),notes:val('availNotes'),viewerTimezone:viewerTimezone()});toast('Availability saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generatePromotionQueue(){try{const r=await gas('generatePromotionQueueFromWeb',state.sessionId);toast(`Generated ${r.created||0} promotion suggestions.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function savePromotion(){try{await gas('savePromotionFromWeb',state.sessionId,{tornId:val('promoTornId'),name:val('promoName'),currentRank:val('promoCurrent'),proposedRank:val('promoProposed'),score:val('promoScore'),criteria:val('promoCriteria'),status:val('promoStatus'),notes:val('promoNotes')});toast('Promotion saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateWeeklyAwards(){try{const r=await gas('generateWeeklyAwardsFromWeb',state.sessionId);toast(`Generated ${r.created||0} award(s).`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveAward(){try{await gas('saveAwardFromWeb',state.sessionId,{tornId:val('awardTornId'),name:val('awardName'),award:val('awardNameField'),category:val('awardCategory'),notes:val('awardNotes')});toast('Award saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function createOnboardingPlan(){try{const r=await gas('createOnboardingPlanFromWeb',state.sessionId,val('onboardTornId'),val('onboardName'));toast(`Created ${r.created||0} onboarding steps.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function updateOnboardingStep(){try{await gas('updateOnboardingStepFromWeb',state.sessionId,val('onboardId'),val('onboardStatus'),val('onboardNotes'));toast('Onboarding step updated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveMentorship(){try{await gas('saveMentorshipFromWeb',state.sessionId,{menteeId:val('menteeId'),menteeName:val('menteeName'),mentorId:val('mentorId'),mentorName:val('mentorName'),goals:val('mentorGoals')});toast('Mentorship saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function logMentorCheckin(){try{await gas('logMentorCheckinFromWeb',state.sessionId,val('mentorCheckId'),val('mentorCheckNote'));toast('Mentor check-in logged.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveKnowledgeArticle(){try{await gas('saveKnowledgeArticleFromWeb',state.sessionId,{category:val('kbCategory'),title:val('kbTitle'),audience:val('kbAudience'),tags:val('kbTags'),content:val('kbContent')});toast('Knowledge article saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function runApiKeyHealthAudit(){try{const r=await gas('runApiKeyHealthAuditFromWeb',state.sessionId);toast(`Checked ${r.checked||0} member keys.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function createPoll(){try{await gas('createPollFromWeb',state.sessionId,{title:val('pollTitle'),description:val('pollDesc'),options:val('pollOptions'),audience:val('pollAudience')});toast('Poll created.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function votePoll(pollId,choice){try{await gas('votePollFromWeb',state.sessionId,pollId,choice);toast('Vote saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveMicrositeSection(){try{await gas('saveRecruitmentMicrositeSectionFromWeb',state.sessionId,{sectionId:val('siteSectionId'),sort:val('siteSort'),title:val('siteTitle'),content:val('siteContent'),buttonText:val('siteButtonText'),buttonUrl:val('siteButtonUrl'),active:val('siteActive')});toast('Microsite section saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+
+
+function v16(){return (state.data && (state.data.v16 || state.data.v16Officer)) || {};}
+function renderV16Setup(){const v=v16();const rows=v.setupWizard||[];byId('setup').innerHTML=`<div class="grid two"><div class="card"><h3>First-run setup wizard</h3><p>This checks whether the faction key, admin access, privacy page, scanner, diagnostics, backups, and sheet protections are ready.</p><button onclick="runSetupWizard()">Run Setup Check</button><button class="secondary" onclick="runDiagnosticsV16()">Run Diagnostics</button></div><div class="card"><h3>Status</h3>${kpi('Setup complete',v.theme&&v.theme.safeMode==='TRUE'?'Safe mode on':((v.versionStatus&&v.versionStatus.setupComplete)?'Yes':'Not yet'))}${table(v.setupChecklist||[],['Sort','Title','Status','Details'])}</div></div><div class="card"><h3>Wizard steps</h3>${table(rows,['Sort','Title','Status','Required','Value_Key','Instructions','Last_Checked','Notes'])}</div>`;}
+function renderV16Privacy(){const privacy=(state.data&&state.data.v16Privacy)||(v16().privacy)||{};byId('privacy').innerHTML=`<div class="grid two"><div class="card"><h3>Privacy / API Disclosure</h3><p class="muted">Show this to members before they submit keys or scanner data.</p><pre class="codebox">${esc(privacy.text||'No disclosure loaded.')}</pre><button onclick="acceptPrivacy(true)">Accept disclosure for my account</button></div><div class="card"><h3>Consent log</h3>${table((privacy.rows||[]).slice().reverse(),['Timestamp','Name','Torn_ID','Consent_Type','Accepted','Version','Notes'])}</div></div>`;}
+function renderV16Updates(){const v=v16(), vs=v.versionStatus||{};byId('updates').innerHTML=`<div class="grid four">${kpi('Current app',vs.current||'')}${kpi('Setup complete',vs.setupComplete?'Yes':'No')}${kpi('Missing sheets',(vs.missingSheets||[]).length)}${kpi('Safe mode',(v.theme&&v.theme.safeMode)||'FALSE')}</div><div class="card"><h3>Version / migration log</h3>${table(vs.versions||[],['Version','Installed','Title','Changes','Migration_Status','Notes'])}</div><div class="card"><h3>Missing sheets</h3><pre class="codebox">${esc((vs.missingSheets||[]).join('\n')||'None')}</pre><button onclick="runSetupWizard()">Repair / run setup check</button></div>`;}
+function renderV16Backups(){const v=v16();byId('backups').innerHTML=`<div class="grid two"><div class="card"><h3>Backups</h3><p>Create a full copy of the active Google Sheet before upgrades, big imports, payout changes, or repairs.</p><button onclick="createBackupV16()">Create Backup Copy</button></div><div class="card"><h3>Backup rules</h3><p>Keep several backups and rename important ones before deleting old copies.</p></div></div><div class="card"><h3>Backup history</h3>${table(v.backups||[],['Timestamp','Type','Spreadsheet_URL','Status','Created_By','Notes'])}</div>`;}
+function renderV16Diagnostics(){const v=v16();byId('diagnostics').innerHTML=`<div class="card"><h3>Diagnostics</h3><p>Checks sheets, settings, deployment URL, faction key, scanner bridge, Discord config, and safe mode.</p><button onclick="runDiagnosticsV16()">Run Diagnostics</button></div><div class="card"><h3>Latest checks</h3>${table((v.diagnostics||[]).slice().reverse(),['Timestamp','Category','Check_Name','Status','Details','Recommended_Action'])}</div>`;}
+function renderV16ScannerInstall(){const v=v16(), sc=v.scannerInstall||{};byId('scannerinstall').innerHTML=`<div class="grid two"><div class="card"><h3>Scanner install</h3><ol><li>Install Tampermonkey.</li><li>Add ShadowCoreScanner.user.js.</li><li>Open Torn.</li><li>Enter backend URL and scanner token.</li><li>Click Test HQ.</li></ol><label>Backend URL</label><input readonly value="${esc(sc.backendUrl||'')}"><label>Scanner token</label><input readonly value="${esc(sc.scannerToken||'Run setupShadowCoreScannerBridge() first')}"><label>UserScript version</label><input readonly value="${esc(sc.userScriptVersion||'1.5+')}"></div><div class="card"><h3>Member scanner onboarding</h3><label>Torn ID</label><input id="scanOnbTornId"><label>Name</label><input id="scanOnbName"><button onclick="createScannerOnboarding()">Create Scanner Onboarding Steps</button><p class="muted">This adds scanner-specific steps to the member onboarding checklist.</p></div></div><div class="card"><h3>Registered scanner installs</h3>${table(sc.installs||[],['Timestamp','Torn_ID','Name','Scanner_Version','API_Enabled','Last_Check','Status','Notes'])}</div>`;}
+function renderV16Tokens(){const v=v16();byId('tokens').innerHTML=`<div class="grid two"><div class="card"><h3>Issue member/officer token</h3><label>Torn ID</label><input id="tokTornId"><label>Name</label><input id="tokName"><label>Role</label><select id="tokRole"><option>MEMBER</option><option>CORE</option><option>OFFICER</option></select><label>Notes</label><textarea id="tokNotes"></textarea><button onclick="issueMemberToken()">Issue Token</button><p class="muted">The raw token is shown once. Store/share it carefully.</p></div><div class="card"><h3>Revoke token</h3><label>Token ID</label><input id="tokRevokeId"><button onclick="revokeMemberToken()">Revoke Token</button><pre id="lastIssuedToken" class="codebox">No token issued this session.</pre></div></div><div class="card"><h3>Token log</h3>${table(v.memberTokens||[],['Token_ID','Torn_ID','Name','Role','Status','Issued','Expires','Last_Used','Issued_By','Notes'])}</div>`;}
+function renderV16Commands(){const v=v16();byId('commands').innerHTML=`<div class="card"><h3>Command-style Discord messages</h3><p>These are webhook report templates that mimic simple slash commands.</p><div class="actions"><button onclick="runDiscordCommand('/warreport')">/warreport</button><button onclick="runDiscordCommand('/payouts')">/payouts</button><button onclick="runDiscordCommand('/targets')">/targets</button><button onclick="runDiscordCommand('/revives')">/revives</button><button onclick="runDiscordCommand('/applications')">/applications</button><button onclick="runDiscordCommand('/checkin')">/checkin</button></div><pre id="commandOutput" class="codebox">Run a command to preview/post output.</pre></div><div class="card"><h3>Command templates</h3>${table(v.discordCommands||[],['Command','Description','Template','Last_Run','Last_Output','Enabled','Role'])}</div>`;}
+function renderV16Protection(){const v=v16();byId('protection').innerHTML=`<div class="card"><h3>Sheet protection</h3><p>Protects critical tabs like Settings, API_Keys, Payouts, Treasury, Loans, Audit, Errors, tokens, and privacy logs from accidental edits.</p><button onclick="protectSheetsV16()">Protect Critical Sheets</button></div><div class="card"><h3>Protection log</h3>${table(v.protections||[],['Timestamp','Sheet_Name','Protected','Editors','Status','Notes'])}</div>`;}
+function renderV16SafeMode(){const v=v16(), safe=(v.theme&&v.theme.safeMode)==='TRUE';byId('safemode').innerHTML=`<div class="grid two"><div class="card"><h3>Safe Mode</h3><p>Use this while repairing the sheet/app. It is intended to disable heavy scanner writes, sync, and Discord activity where supported.</p>${kpi('Current safe mode',safe?'ON':'OFF',safe?'status-bad':'status-ok')}<label>Reason</label><textarea id="safeReason"></textarea><button onclick="setSafeMode(true)">Turn Safe Mode ON</button><button class="secondary" onclick="setSafeMode(false)">Turn Safe Mode OFF</button></div><div class="card"><h3>Disabled when ON</h3><ul><li>Heavy sync/reports should be paused by leaders.</li><li>v1.6 write endpoint refuses non-ping writes.</li><li>Scanner bridge can be manually disabled while repairing.</li></ul></div></div><div class="card"><h3>Safe mode log</h3>${table(v.safeModeLog||[],['Timestamp','Safe_Mode','Changed_By','Reason','Disabled_Features'])}</div>`;}
+function renderV16Manual(){const v=v16();byId('manual').innerHTML=`<div class="card"><h3>Admin manual</h3>${(v.adminManual||[]).map(a=>`<div class="card"><h3>${esc(a.Title)}</h3><p class="muted">${esc(a.Category)} · Updated ${esc(a.Updated)}</p><p>${esc(a.Content).replace(/\n/g,'<br>')}</p></div>`).join('')||'<p class="muted">No manual articles.</p>'}</div>`;}
+function renderV16Theme(){const v=v16(), t=v.theme||{};byId('theme').innerHTML=`<div class="grid two"><div class="card"><h3>ShadowCore theme</h3><label>Theme mode</label><input id="themeMode" value="${esc(t.mode||'Anthracite')}"><label>Accent color</label><input id="themeAccent" value="${esc(t.accent||'#f59e0b')}"><label>Background</label><input id="themeBackground" value="${esc(t.background||'#05070a')}"><label>Public custom domain / redirect</label><input id="themeDomain" value="${esc(t.customDomain||'')}"><button onclick="saveThemeV16()">Save Theme Settings</button></div><div class="card microsite-hero"><h3>Recruitment preview polish</h3><p>Use the public microsite page for recruiting. Add your custom domain here once you set up a redirect or wrapper page.</p></div></div>`;}
+
+async function runSetupWizard(){try{const r=await gas('runSetupWizardCheckFromWeb',state.sessionId);toast(`Setup check complete. Required open: ${r.openRequired}`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function acceptPrivacy(v){try{await gas('acceptPrivacyDisclosureFromWeb',state.sessionId,v);toast('Privacy/API disclosure saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function createBackupV16(){try{const r=await gas('createBackupCopyFromWeb',state.sessionId);toast('Backup created.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function runDiagnosticsV16(){try{const r=await gas('runDiagnosticsFromWeb',state.sessionId);toast(`Diagnostics: ${r.checks} checks, ${r.warnings} warnings.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function createScannerOnboarding(){try{const r=await gas('createScannerOnboardingStepsFromWeb',state.sessionId,val('scanOnbTornId'),val('scanOnbName'));toast(`Created ${r.created} scanner onboarding steps.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function issueMemberToken(){try{const r=await gas('issueMemberTokenFromWeb',state.sessionId,{tornId:val('tokTornId'),name:val('tokName'),role:val('tokRole'),notes:val('tokNotes')});byId('lastIssuedToken').textContent=`Token: ${r.token}\nExpires: ${r.expires}\nFingerprint: ${r.fingerprint}`;toast('Token issued. Copy it now.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function revokeMemberToken(){try{await gas('revokeMemberTokenFromWeb',state.sessionId,val('tokRevokeId'));toast('Token revoked.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function runDiscordCommand(cmd){try{const r=await gas('runDiscordCommandFromWeb',state.sessionId,cmd);byId('commandOutput').textContent=r.output||'';toast('Command generated.');loadState();}catch(err){toast(err.message||String(err),true);}}
+async function protectSheetsV16(){try{const r=await gas('protectCriticalSheetsFromWeb',state.sessionId);toast(`Protected ${r.protected} sheets.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function setSafeMode(enabled){try{await gas('setSafeModeFromWeb',state.sessionId,enabled,val('safeReason'));toast(`Safe mode ${enabled?'enabled':'disabled'}.`);loadState();}catch(err){toast(err.message||String(err),true);}}
+async function saveThemeV16(){try{await gas('saveThemeSettingFromWeb',state.sessionId,{themeMode:val('themeMode'),accent:val('themeAccent'),background:val('themeBackground'),customDomain:val('themeDomain')});toast('Theme settings saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
+
+function kpi(label,value,cls=''){return `<div class="kpi"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`;}
+function table(rows, cols){rows=rows||[];if(!rows.length)return '<p class="muted">No rows yet.</p>';cols=cols||Object.keys(rows[0]);return `<div style="overflow:auto;max-height:520px"><table><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${esc(formatCell(r[c], c))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;}
+function renderObject(obj){if(!obj||!Object.keys(obj).length)return '<p class="muted">No data yet.</p>';return `<table><tbody>${Object.keys(obj).map(k=>`<tr><th>${esc(k)}</th><td>${esc(formatCell(obj[k], k))}</td></tr>`).join('')}</tbody></table>`;}
+function formatCell(v,key=''){if(v===null||v===undefined)return '';if(typeof v==='object')return JSON.stringify(v);const k=String(key||'').toLowerCase();if(/timestamp|updated|date|time|until|last_polled|next_poll|estimate|generated/.test(k)){const t=formatLocalTime12(v);if(t)return t;}if(typeof v==='number'&&Math.abs(v)>10000)return String(v);return String(v);}
+function formatLocalTime12(v){if(v===null||v===undefined||v==='')return '';let d=null;if(typeof v==='number'&&v>1000000000){d=new Date(v*(v>9999999999?1:1000));}else{const s=String(v).trim();if(/^\d+$/.test(s)&&Number(s)>1000000000)d=new Date(Number(s)*(Number(s)>9999999999?1:1000));else if(/T|GMT|UTC|\d{4}-\d{2}-\d{2}/.test(s))d=new Date(s);}if(!d||isNaN(d.getTime()))return '';return d.toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true});}
+function v22(){return (state.data&&state.data.v22)||{};}
+function timezoneOptions(selected){const zones=(v22().timezones||['America/New_York','America/Chicago','America/Denver','America/Los_Angeles','UTC','Europe/London','Europe/Paris','Asia/Tokyo','Australia/Sydney']);return zones.map(z=>`<option value="${esc(z)}" ${String(z)===String(selected)?'selected':''}>${esc(z)}</option>`).join('');}
+function viewerTimezone(){return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';}
+function localOffsetNote(tz){try{const now=new Date();const local=new Intl.DateTimeFormat('en-US',{timeZone:tz,timeZoneName:'shortOffset'}).formatToParts(now).find(p=>p.type==='timeZoneName')?.value||'';return local;}catch(e){return '';}}
+function money(n){return '$'+Number(n||0).toLocaleString();}
+function esc(v){return String(v??'').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));}
+
+
+function v19(){return (state.data&&state.data.v19)||{};}
+
+function v20(){return (state.data&&state.data.v20)||{};}
+function gymOptions(selected){const gyms=(v20().gyms||[]); return gyms.map(g=>`<option ${String(g.Gym)===String(selected)?'selected':''}>${esc(g.Gym)}</option>`).join('');}
+function presetOptions(selected){const presets=(v20().presets||[]); return presets.map(p=>`<option value="${esc(p.Preset_ID)}" ${String(p.Preset_ID)===String(selected)?'selected':''}>${esc(p.Name||p.Preset_ID)}</option>`).join('');}
+function renderV20GymGains(){const data=v20(), latest=(data.sessions||[]).slice(-1)[0]||{}, latestProj=(data.projections||[]).slice(-1)[0]||{}, latestGoal=(data.goals||[]).slice(-1)[0]||{}, api=(data.apiBonuses||[]).slice(-1)[0]||{}; byId('gymgains').innerHTML=`
+  <div class="grid four">
+    ${kpi('Formula','Vladar')}${kpi('Gyms',(data.gyms||[]).length)}${kpi('Last gains',num(latest.Gains||0))}${kpi('Last projected cost',money(latestProj.Total_Cost||0))}
+  </div>
+  <div class="grid two">
+    <div class="card"><h3>Single-session calculator</h3>
+      <div class="grid two"><div><label>Stat</label><select id="gymStat"><option>Strength</option><option>Speed</option><option>Defense</option><option>Dexterity</option></select></div><div><label>Gym</label><select id="gymName">${gymOptions("George's")}</select></div></div>
+      <div class="grid two"><div><label>Current stat</label><input id="gymCurrent" value="100000"></div><div><label>Starting happy</label><input id="gymHappy" value="5000"></div></div>
+      <div class="grid two"><div><label>Energy used</label><input id="gymEnergy" value="150"></div><div><label>Total modifier</label><input id="gymModifier" value="1.00"></div></div>
+      <div class="grid two"><div><label>Happy loss factor</label><input id="gymLoss" value="0.50"></div><div><label>Preset label</label><input id="gymPresetLabel" placeholder="optional"></div></div>
+      <div class="actions"><button onclick="calcGymSession()">Calculate Session</button><button class="secondary" onclick="compareGyms()">Compare All Gyms</button><button class="secondary" onclick="parseGymApi()">Parse My API Bonuses</button></div>
+      <p class="muted">Uses Vladar's formula. Modifier is your combined multiplier, e.g. 1.10 for +10% total bonus.</p>
+    </div>
+    <div class="card"><h3>Latest session</h3>${renderObject(latest)}<h4>Latest API bonus snapshot</h4>${renderObject(api)}</div>
+  </div>
+  <div class="grid two">
+    <div class="card"><h3>Multi-day projection</h3>
+      <label>Preset</label><select id="projPreset">${presetOptions('P-DAILY3X')}</select>
+      <div class="grid two"><div><label>Days</label><input id="projDays" value="30"></div><div><label>Current stat</label><input id="projCurrent" value="100000"></div></div>
+      <div class="grid two"><div><label>Stat</label><select id="projStat"><option>Strength</option><option>Speed</option><option>Defense</option><option>Dexterity</option></select></div><div><label>Gym</label><select id="projGym">${gymOptions("George's")}</select></div></div>
+      <div class="grid two"><div><label>Start happy</label><input id="projHappy" value="5000"></div><div><label>Modifier</label><input id="projModifier" value="1.00"></div></div>
+      <label>Energy per day</label><input id="projEnergyDay" value="1480">
+      <div class="actions"><button onclick="calcGymProjection()">Project Gains</button><button class="secondary" onclick="showPage('GymGainProjectionView',true)">View Projection</button></div>
+    </div>
+    <div class="card"><h3>Goal estimator</h3>
+      <label>Preset</label><select id="goalPreset">${presetOptions('P-DAILY3X')}</select>
+      <div class="grid two"><div><label>Current stat</label><input id="goalCurrent" value="100000"></div><div><label>Goal stat</label><input id="goalTarget" value="1000000"></div></div>
+      <div class="grid two"><div><label>Stat</label><select id="goalStat"><option>Strength</option><option>Speed</option><option>Defense</option><option>Dexterity</option></select></div><div><label>Gym</label><select id="goalGym">${gymOptions("George's")}</select></div></div>
+      <div class="grid two"><div><label>Start happy</label><input id="goalHappy" value="5000"></div><div><label>Modifier</label><input id="goalModifier" value="1.00"></div></div>
+      <label>Energy per day</label><input id="goalEnergyDay" value="1480">
+      <div class="actions"><button onclick="calcGymGoal()">Estimate Goal Time</button><button class="secondary" onclick="showPage('GymGoalEstimatorView',true)">View Goal</button></div>
+      <h4>Latest goal</h4>${renderObject(latestGoal)}
+    </div>
+  </div>
+  <div class="card"><h3>Jump presets</h3>${table((data.presets||[]), ['Preset_ID','Name','Energy_Per_Day','Natural_Energy_Per_Day','Xanax_Per_Day','Refills_Per_Day','Start_Happy','Happy_Loss_Factor','Active'])}</div>`;}
+function renderV20GymComparison(){const rows=(v20().comparisons||[]); const top=rows.slice().sort((a,b)=>Number(a.Rank)-Number(b.Rank)).slice(0,12); byId('GymGainComparison').innerHTML=`<div class="card"><h3>GymGainComparison</h3><p class="muted">Side-by-side gym comparison for the most recent calculator run.</p>${chartBars(Object.fromEntries(top.map(r=>[r.Gym, Math.round(Number(r.Single_Session_Gains||0))])), 'Gains', false)}${table(rows, ['Rank','Gym','Energy_Per_Train','Gym_Dots','Single_Session_Gains','Gains_Per_Energy','Notes'])}</div>`;}
+function renderV20GymProjectionView(){const rows=(v20().projectionView||[]), proj=(v20().projections||[]).slice(-1)[0]||{}; const gains={}; rows.forEach(r=>gains['Day '+r.Day]=Math.round(Number(r.Gains||0))); byId('GymGainProjectionView').innerHTML=`<div class="grid two"><div class="card"><h3>GymGainProjectionView</h3>${renderObject(proj)}</div><div class="card"><h3>Daily gains chart</h3>${chartBars(gains,'Gains',false)}</div></div><div class="card"><h3>Daily projection rows</h3>${table(rows, ['Day','Stat','Gym','Starting_Stat','Gains','Ending_Stat','Happy_Start','Happy_End','Energy_Used','Cost_To_Date'])}</div>`;}
+function renderV20GymGoalEstimatorView(){const rows=(v20().goalView||[]), goals=(v20().goals||[]); byId('GymGoalEstimatorView').innerHTML=`<div class="card"><h3>GymGoalEstimatorView</h3>${table(rows, ['Goal_ID','Stat','Gym','Goal_Stat','Estimated_Days','Total_Cost','Average_Daily_Gain','Recommendation'])}</div><div class="card"><h3>Goal history</h3>${table(goals, ['Timestamp','Stat','Gym','Starting_Stat','Goal_Stat','Days_Estimated','Total_Cost','Preset'])}</div>`;}
+async function calcGymSession(){try{const r=await gas('calculateV20GymSessionFromWeb',state.sessionId,{stat:val('gymStat'),gym:val('gymName'),currentStat:val('gymCurrent'),happy:val('gymHappy'),energy:val('gymEnergy'),modifier:val('gymModifier'),happyLossFactor:val('gymLoss'),preset:val('gymPresetLabel')});toast('Session gain: '+num(r.result.totalGain));await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function compareGyms(){try{const r=await gas('compareV20GymsFromWeb',state.sessionId,{stat:val('gymStat'),currentStat:val('gymCurrent'),happy:val('gymHappy'),energy:val('gymEnergy'),modifier:val('gymModifier'),happyLossFactor:val('gymLoss')});toast('Compared '+(r.rows||[]).length+' gyms.');await loadState();showPage('GymGainComparison',true);}catch(err){toast(err.message||String(err),true);}}
+async function calcGymProjection(){try{const r=await gas('calculateV20GymProjectionFromWeb',state.sessionId,{preset:val('projPreset'),days:val('projDays'),stat:val('projStat'),gym:val('projGym'),currentStat:val('projCurrent'),happy:val('projHappy'),modifier:val('projModifier'),energyPerDay:val('projEnergyDay')});toast('Projected gains: '+num(r.summary.Total_Gains));await loadState();showPage('GymGainProjectionView',true);}catch(err){toast(err.message||String(err),true);}}
+async function calcGymGoal(){try{const r=await gas('calculateV20GymGoalFromWeb',state.sessionId,{preset:val('goalPreset'),stat:val('goalStat'),gym:val('goalGym'),currentStat:val('goalCurrent'),goalStat:val('goalTarget'),happy:val('goalHappy'),modifier:val('goalModifier'),energyPerDay:val('goalEnergyDay')});toast('Estimated days: '+r.summary.Days_Estimated);await loadState();showPage('GymGoalEstimatorView',true);}catch(err){toast(err.message||String(err),true);}}
+async function parseGymApi(){try{const r=await gas('parseV20BonusesFromStoredKeyFromWeb',state.sessionId);toast('API bonuses parsed. Recommended modifier '+(r.snapshot.Recommended_Modifier||''));await loadState();}catch(err){toast(err.message||String(err),true);}}
+function num(n){return Number(n||0).toLocaleString(undefined,{maximumFractionDigits:2});}
+
+function renderV19WarCountdown(){
+  const v=v19(), mon=v.activeMonitor||{}, monitors=v.monitors||[];
+  byId('warcountdown').innerHTML=`
+    <div class="grid four">
+      ${kpi('v1.9', v.version||'')}
+      ${kpi('Active monitor', mon.Monitor_ID||'None')}
+      ${kpi('Faction', (mon.Faction_Name||mon.Faction_ID||'—'))}
+      ${kpi('Snapshots', mon.Snapshot_Count||0)}
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <h3>Create 105-hour ranked-war monitor</h3>
+        <p class="muted">Polls a selected Torn faction during the ranked-war countdown and builds a readiness report from status/last-action snapshots. Default polling is 15 minutes.</p>
+        <label>Enemy faction ID</label><input id="v19FactionId" placeholder="Enemy faction ID">
+        <label>Enemy faction name</label><input id="v19FactionName" placeholder="Optional; will auto-fill after polling if available">
+        <label>Countdown hours</label><input id="v19Hours" type="number" value="105">
+        <label>Poll interval minutes</label><input id="v19PollMinutes" type="number" value="15">
+        <label>Notes</label><textarea id="v19Notes" placeholder="War notes, faction notes, expected start, etc."></textarea>
+        <button onclick="createV19Monitor()">Create Monitor</button>
+        <button class="secondary" onclick="installV19Trigger()">Install 15-min Trigger</button>
+        <button class="secondary" onclick="removeV19Trigger()">Remove Trigger</button>
+      </div>
+      <div class="card">
+        <h3>Active monitor controls</h3>
+        ${renderObject(mon)}
+        <div class="actions"><button onclick="pollV19Monitor()">Poll Now</button><button onclick="generateV19Report()">Generate Final / Current Report</button></div>
+        <p class="muted">Landing Watcher tracks members seen traveling/abroad and flags return windows.</p>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card"><h3>Monitors</h3>${table(monitors.slice().reverse(),['Monitor_ID','Faction_ID','Faction_Name','Status','Countdown_Start','War_Start_Estimate','Poll_Interval_Minutes','Snapshot_Count','Last_Polled','Next_Poll_Due'])}</div>
+      <div class="card"><h3>Landing Watcher</h3>${table((v.travelWatch||[]).slice().reverse(),['Name','Travel_State','Travel_Description','Expected_Return','Return_Detected','Return_Timestamp','Landing_Window'])}</div>
+    </div>
+    <div class="card"><h3>Latest raw snapshots</h3>${table((v.latestSnapshots||[]).slice().reverse(),['Timestamp','Name','Status_State','Status_Description','Last_Action_Status','Online_Flag','Active_Flag','Okay_Flag','Travel_Flag','Hospital_Flag','Jail_Flag','Abroad_Flag'])}</div>`;
+}
+function renderV19MemberActivityTable(){const v=v19(); byId('MemberActivityTable').innerHTML=`
+  <div class="card"><h3>MemberActivityTable</h3><p class="muted">Generated from countdown snapshots. Sorts enemy members by target-window score, activity consistency, state patterns, and likely role.</p><button onclick="generateV19Report()">Regenerate Table</button></div>
+  <div class="card">${table((v.memberActivity||[]).slice().sort((a,b)=>Number(b.Target_Window_Score||0)-Number(a.Target_Window_Score||0)),['Name','Torn_ID','Level','Latest_Status','Latest_Description','Latest_Last_Action','Online_Pct','Active_Pct','Okay_Pct','Travel_Count','Hospital_Count','Jail_Count','Abroad_Count','Active_Hours_Torn','Target_Window_Score','Role_Suggestion'])}</div>`;}
+function renderV19ActivityHeatmap(){const v=v19(), rows=v.heatmap||[]; byId('ActivityHeatmap').innerHTML=`
+  <div class="grid two"><div class="card"><h3>ActivityHeatmap</h3><p class="muted">Torn time is treated as UTC/TCT. Darker/high bars indicate stronger observed activity or weakness depending on chart.</p><button onclick="generateV19Report()">Regenerate Heatmap</button></div><div class="card"><h3>Weakness score by Torn hour</h3>${chartBars(groupHeat(rows,'Weakness_Score'), 'Weakness')}</div></div>
+  <div class="card"><h3>24-hour heatmap</h3>${heatmapV19(rows)}</div>
+  <div class="card"><h3>Heatmap table</h3>${table(rows,['Torn_Hour','Label','Samples','Members_Seen','Online_Count','Active_Count','Okay_Count','Travel_Count','Hospital_Count','Jail_Count','Abroad_Count','Online_Rate','Active_Rate','Weakness_Score'])}</div>`;}
+function renderV19WarReadinessReportView(){const v=v19(), reports=v.reports||[], latest=reports[reports.length-1]||{}; byId('WarReadinessReportView').innerHTML=`
+  <div class="grid two"><div class="card"><h3>WarReadinessReportView</h3><p class="muted">Final pre-war report sections: overview, activity table, peak hours, weak hours, travel/hospital patterns, consistency, targets, avoid list, chain fillers, and notes.</p><button onclick="generateV19Report()">Generate Report</button></div><div class="card"><h3>Latest report</h3>${renderObject(latest)}</div></div>
+  <div class="card"><h3>Report sections</h3>${table(v.reportView||[],['Sort','Title','Body'])}</div>
+  <div class="card"><h3>Markdown report</h3><pre class="codebox">${esc(latest.Markdown||'No report generated yet.')}</pre></div>`;}
+function groupHeat(rows, field){const out={}; (rows||[]).forEach(r=>{out[String(r.Label||r.Torn_Hour)]=Number(r[field]||0);}); return out;}
+function heatmapV19(rows){if(!rows||!rows.length)return '<p class="muted">No heatmap generated yet.</p>'; const max=Math.max(...rows.map(r=>Number(r.Weakness_Score||0)),1); return `<div class="v19-heatmap">${rows.map(r=>{const p=Math.round((Number(r.Weakness_Score||0)/max)*100);return `<div class="heatcell" style="opacity:${0.35+(p/100)*0.65}"><b>${esc(r.Torn_Hour)}:00</b><span>Weak ${esc(r.Weakness_Score)}</span><small>Active ${esc(r.Active_Rate||'0%')}</small></div>`;}).join('')}</div>`;}
+async function createV19Monitor(){try{const r=await gas('createV19RankedWarMonitorFromWeb',state.sessionId,{factionId:val('v19FactionId'),factionName:val('v19FactionName'),countdownHours:val('v19Hours'),pollMinutes:val('v19PollMinutes'),notes:val('v19Notes')});toast('Monitor created: '+r.monitorId);await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function pollV19Monitor(){try{const r=await gas('pollV19RankedWarCountdownMonitorFromWeb',state.sessionId,'');toast('Polled '+r.members+' members, snapshots '+r.snapshots);await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateV19Report(){try{const r=await gas('generateV19WarReadinessReportFromWeb',state.sessionId,'');toast('Report generated: '+r.reportId);await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function installV19Trigger(){try{const r=await gas('installV19RankedWarCountdownTriggerFromWeb',state.sessionId);toast('Trigger installed every '+r.intervalMinutes+' minutes.');await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function removeV19Trigger(){try{const r=await gas('removeV19RankedWarCountdownTriggerFromWeb',state.sessionId);toast('Removed triggers: '+r.removed);await loadState();}catch(err){toast(err.message||String(err),true);}}
+
+
+function v18(){return (state.data&&state.data.v18)||{};}
+function renderV18ScannerDeep(){const v=v18(); const vis=v.visuals||{}; byId('scannerdeep').innerHTML=`
+  <div class="grid four">
+    ${kpi('v1.8 version', v.version||'')}
+    ${kpi('Deep sheets', Object.keys(vis.counts||{}).length)}
+    ${kpi('Open risks', (v.riskFlags||[]).filter(r=>String(r.Status||'Open')==='Open').length, 'status-warn')}
+    ${kpi('Open recs', (v.recommendations||[]).filter(r=>String(r.Status||'Open')==='Open').length)}
+  </div>
+  <div class="grid two">
+    <div class="card"><h3>Deep scanner categories</h3>${chartBars(vis.counts||{}, 'Rows by sheet')}</div>
+    <div class="card"><h3>Latest cooldown forecasts</h3>${table((v.cooldowns||[]).slice(-20).reverse(),['Timestamp','Name','Energy','Life','Drug_CD','Medical_CD','Booster_CD','War_Ready'])}</div>
+  </div>
+  <div class="grid two">
+    <div class="card"><h3>Armory / gear scans</h3>${table((v.gear||[]).slice(-20).reverse(),['Timestamp','Item','Category','Quality','Damage','Accuracy','Armor','Bonus','Price'])}</div>
+    <div class="card"><h3>Faction / upgrade snapshots</h3>${table((v.factionProgress||[]).slice(-20).reverse(),['Timestamp','Faction_Name','Respect','Rank','Members','Upgrade_Branch','Upgrade_Level','Next_Goal'])}</div>
+  </div>`;}
+function renderV18Visuals(){const v=v18(), vis=v.visuals||{}; const merged=v22().memberStatusesMerged||[]; const fallbackStatus={Okay:0,Hospital:0,Jail:0,Travel:0,Other:0}; merged.forEach(s=>{const t=String(s.Status||'').toLowerCase(); if(t.includes('hospital'))fallbackStatus.Hospital++; else if(t.includes('jail'))fallbackStatus.Jail++; else if(t.includes('travel')||t.includes('abroad'))fallbackStatus.Travel++; else if(t.includes('okay')||t==='ok')fallbackStatus.Okay++; else fallbackStatus.Other++;}); const statusCounts=Object.values(vis.statusCounts||{}).some(Number)?vis.statusCounts:fallbackStatus; byId('visuals').innerHTML=`
+  <div class="card"><h3>Graphs / Visuals</h3><p class="muted">Charts render from live sheet data and scanner/API readiness fallbacks. Generate metrics, then refresh; member status charts also use merged readiness snapshots.</p><button onclick="generateV18Visuals()">Generate Visual Snapshot</button></div>
+  <div class="grid two">
+    <div class="card"><h3>Member status mix</h3>${chartBars(statusCounts, 'Members')}</div>
+    <div class="card"><h3>Risk severity</h3>${chartBars(vis.riskCounts||{}, 'Risks')}</div>
+  </div>
+  <div class="grid two">
+    <div class="card"><h3>Recommendation types</h3>${chartBars(vis.recommendationCounts||{}, 'Recommendations')}</div>
+    <div class="card"><h3>Deep scanner row counts</h3>${chartBars(vis.counts||{}, 'Rows', true)}</div>
+  </div>
+  <div class="card"><h3>Member status source data</h3>${table(merged.slice().reverse(), ['Name','Status','Energy','Life','Nerve','Happy','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}</div>
+  <div class="card"><h3>Visual snapshot history</h3>${table((vis.latestVisualSnapshots||[]).slice(-100).reverse(),['Timestamp','Metric','Label','Value','Group','Source','Notes'])}</div>`;}
+function renderV18ScannerOptIn(){const v=v18(); byId('scanneroptin').innerHTML=`
+  <div class="card"><h3>Scanner opt-in preferences</h3><p class="muted">Sensitive categories stay opt-in. This table shows what each member has enabled from the Tampermonkey scanner.</p></div>
+  <div class="card">${table((v.optIns||[]).slice().reverse(),['Torn_ID','Name','Scanner_Version','Deep_Scanner','Sensitive_Business','Sensitive_Property','Sensitive_Education','Sensitive_Casino','Gear','Cooldowns','Risk_Flags','Last_Updated','Notes'])}</div>`;}
+function renderV18Recommendations(){const v=v18(); byId('recommendations').innerHTML=`
+  <div class="grid two"><div class="card"><h3>Smart recommendations</h3><p>Generated from scanner/API data, risk flags, readiness, loans, gear, support, and growth signals.</p><button onclick="generateV18Recs()">Generate Smart Recommendations</button></div><div class="card"><h3>Risk flags</h3>${chartBars(((v.visuals||{}).riskCounts)||{}, 'Risks')}</div></div>
+  <div class="card"><h3>Open recommendations</h3>${table((v.recommendations||[]).slice().reverse(),['Timestamp','Type','Priority','Name','Recommendation','Reason','Status','Assigned_To'])}</div>
+  <div class="card"><h3>Member risk flags</h3>${table((v.riskFlags||[]).slice().reverse(),['Timestamp','Name','Risk_Type','Severity','Evidence','Recommended_Action','Status'])}</div>`;}
+function renderV18TabOrganizer(){const v=v18(); byId('taborganizer').innerHTML=`
+  <div class="grid two"><div class="card"><h3>Google Sheet tab organizer</h3><p>This keeps the workbook usable without renaming old tabs. It reorders tabs, colors tabs by section, and can create section marker tabs.</p><button onclick="reorganizeTabsV18()">Reorganize Tabs</button></div><div class="card"><h3>Sections</h3>${chartBars(groupCounts(v.tabs||[],'Section'), 'Sheets')}</div></div>
+  <div class="card"><h3>Current planned tab order</h3>${table(v.tabs||[],['Sort','Section','Sheet_Name','Color','Description','Exists','Last_Checked'])}</div>`;}
+async function generateV18Visuals(){try{const res=await gas('generateV18VisualSnapshot'); toast('Visual snapshot generated: '+(res.metrics||0)+' metrics.'); await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateV18Recs(){try{const res=await gas('generateV18SmartRecommendations'); toast('Recommendations created: '+(res.recommendationsCreated||0)); await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function reorganizeTabsV18(){try{const res=await gas('reorganizeShadowCoreSheetsV18'); toast('Tabs reorganized: '+(res.moved||0)); await loadState();}catch(err){toast(err.message||String(err),true);}}
+function groupCounts(rows, field){const out={}; (rows||[]).forEach(r=>{const k=r[field]||'Other'; out[k]=(out[k]||0)+1;}); return out;}
+function chartBars(obj, label, compact=false){const entries=Object.entries(obj||{}).filter(([k,v])=>Number(v)>0).sort((a,b)=>Number(b[1])-Number(a[1])).slice(0, compact?12:20); if(!entries.length) return '<p class="muted">No chart data yet.</p>'; const max=Math.max(...entries.map(e=>Number(e[1])||0),1); return `<div class="bar-chart" aria-label="${esc(label||'chart')}">${entries.map(([k,v])=>{const pct=Math.max(4,Math.round((Number(v)||0)/max*100)); return `<div class="bar-row"><span class="bar-label" title="${esc(k)}">${esc(k)}</span><span class="bar-track"><span class="bar-fill" style="width:${pct}%"></span></span><b>${esc(v)}</b></div>`;}).join('')}</div>`;}
+
+
+function v24(){return (state.data&&state.data.v24)||{};}
+function v24my(){return (v24().my)||{};}
+function renderV24Advisor(){
+  const v=v24(), my=v24my(), scores=v.scores||[], visuals=v.visuals||[], needs=v.factionNeeds||[];
+  const scoreBuckets={}; visuals.filter(r=>r.Metric==='Informed Score Buckets').slice(-12).forEach(r=>scoreBuckets[r.Label]=Number(r.Value)||0);
+  const readyBuckets={}; visuals.filter(r=>r.Metric==='War Readiness Buckets').slice(-12).forEach(r=>readyBuckets[r.Label]=Number(r.Value)||0);
+  byId('advisor').innerHTML=`
+    <div class="grid two"><div class="card"><h3>ShadowCore Advisor</h3><p>Generates member next-best-actions, informed scores, role suggestions, guide recommendations, confidence labels, timelines, weekly reports, faction needs, alert explanations, and officer coaching queues.</p><div class="actions"><button onclick="generateV24Advisor()">Generate Advisor Intelligence</button><button onclick="generateV24WeeklyReports()">Generate Weekly Reports</button></div></div><div class="card"><h3>My score</h3>${renderAdvisorScore(my.score||{})}</div></div>
+    <div class="grid two"><div class="card"><h3>Informed score buckets</h3>${chartBars(scoreBuckets,'Members')}</div><div class="card"><h3>War readiness buckets</h3>${chartBars(readyBuckets,'Members')}</div></div>
+    <div class="card"><h3>Faction needs right now</h3>${table(needs.slice().reverse(),['Timestamp','Category','Need','Priority','Count_Needed','Evidence','Recommended_Action','Status'])}</div>
+    <div class="card"><h3>Member advisor scores</h3>${table(scores.slice().reverse(),['Name','Informed_Score','War_Readiness','Scanner_Status','API_Status','Availability_Status','Knowledge_Status','Top_Gap','Updated'])}</div>`;
+}
+function renderV24MyAdvisor(){
+  const my=v24my(), score=my.score||{}, actions=(my.actions||[]).slice().reverse(), role=(my.role||[]).slice(-1)[0]||{}, train=(my.trainingAdvice||[]).slice(-1)[0]||{}, coach=(my.warCoaching||[]).slice(-1)[0]||{};
+  byId('myadvisor').innerHTML=`
+    <div class="grid four">${kpi('Informed Score',score.Informed_Score||'—',scoreClass(score.Informed_Score))}${kpi('War Readiness',score.War_Readiness||'—',scoreClass(score.War_Readiness))}${kpi('Role',role.Role||'Not assigned')}${kpi('Top gap',score.Top_Gap||'None')}</div>
+    <div class="grid two"><div class="card"><h3>What should I do now?</h3>${actions.length?actions.map(a=>advisorActionCard(a)).join(''):'<p class="muted">No advisor actions yet. Ask an officer to generate Advisor Intelligence.</p>'}</div><div class="card"><h3>Why am I seeing this?</h3>${renderObject(score)}${renderObject(coach)}</div></div>
+    <div class="grid two"><div class="card"><h3>Training advisor</h3>${renderObject(train)}</div><div class="card"><h3>Current war role</h3>${renderObject(role)}</div></div>
+    <div class="card"><h3>My timeline</h3>${table((my.timeline||[]).slice().reverse(),['Timestamp','Category','Event','Impact','Source','Visibility'])}</div>`;
+}
+function renderV24MemberEducation(){
+  const my=v24my(), v=v24();
+  byId('membereducation').innerHTML=`
+    <div class="grid two"><div class="card"><h3>Member education score</h3>${renderAdvisorScore(my.score||{})}<p class="muted">This score blends onboarding, scanner/API freshness, availability, knowledge base guidance, and war readiness.</p></div><div class="card"><h3>Personalized guides</h3>${table((my.guides||[]).slice().reverse(),['Title','Reason','Priority','Status'])}</div></div>
+    <div class="grid two"><div class="card"><h3>Data confidence labels</h3>${table((my.confidence||[]).slice().reverse(),['Data_Type','Value','Source','Confidence','Last_Updated','Needs_Refresh','Notes'])}</div><div class="card"><h3>Smart explanations</h3>${table((my.explanations||[]).slice().reverse(),['Feature','Recommendation','Why','Data_Used','Confidence'])}</div></div>`;
+}
+function renderV24WeeklyReport(){
+  const my=v24my(), v=v24();
+  byId('weeklyreport').innerHTML=`
+    <div class="card"><h3>Weekly member reports</h3><p>Officer-generated summaries of hits, respect, payouts, support, awards, training progress, and next step.</p><button onclick="generateV24WeeklyReports()">Generate Weekly Reports</button></div>
+    <div class="grid two"><div class="card"><h3>My latest report</h3>${((my.weeklyReports||[]).slice(-1).map(r=>`<pre class="codebox">${esc(r.Body||'')}</pre>`).join(''))||'<p class="muted">No weekly report generated yet.</p>'}</div><div class="card"><h3>All recent reports</h3>${table((v.weeklyReports||my.weeklyReports||[]).slice().reverse(),['Generated','Name','War_Hits','Respect','Payout_Earned','Support_Used','Awards','Top_Action','Status'])}</div></div>`;
+}
+function renderV24CoachingQueue(){
+  const v=v24();
+  byId('coachingqueue').innerHTML=`
+    <div class="card"><h3>Officer coaching queue</h3><p>Shows members who need help instead of only punishment: scanner setup, availability, onboarding, war readiness, and training gaps.</p><button onclick="generateV24Advisor()">Refresh Coaching Queue</button></div>
+    <div class="card">${table((v.coachingQueue||[]).slice().reverse(),['Name','Issue','Severity','Recommended_Coach','Suggested_Message','Status','Assigned_To','Evidence','Updated'])}</div>`;
+}
+function renderV24FactionNeeds(){
+  const v=v24(), alerts=v.alertExplanations||[];
+  byId('factionneeds').innerHTML=`
+    <div class="grid two"><div class="card"><h3>Faction-wide “what we need” board</h3>${table((v.factionNeeds||[]).slice().reverse(),['Timestamp','Category','Need','Priority','Count_Needed','Evidence','Recommended_Action','Status'])}</div><div class="card"><h3>Alert explanations</h3>${table(alerts.slice().reverse(),['Timestamp','Alert_Type','Title','Message','Why','Priority','Audience'])}</div></div>`;
+}
+function renderAdvisorScore(score){if(!score||!Object.keys(score).length)return '<p class="muted">No score generated yet.</p>';return `<div class="advisor-score ${scoreClass(score.Informed_Score)}"><b>${esc(score.Informed_Score||'—')}</b><span>Informed Score</span></div><p><b>Top gap:</b> ${esc(score.Top_Gap||'None')}</p><p>${esc(score.Explanation||'')}</p>`;}
+function advisorActionCard(a){return `<div class="advisor-action"><div><b>${esc(a.Priority)} · ${esc(a.Category)}</b><h4>${esc(a.Action)}</h4><p><b>Why:</b> ${esc(a.Why)}</p><p><b>Impact:</b> ${esc(a.Impact)}</p><small>Confidence: ${esc(a.Confidence)} · Status: ${esc(a.Status)}</small></div><button onclick="completeV24Action('${esc(a.Action_ID)}')">Mark done</button></div>`;}
+function scoreClass(v){v=Number(v)||0;return v>=80?'status-ok':v>=60?'status-warn':'status-bad';}
+async function generateV24Advisor(){try{const r=await gas('generateV24AdvisorIntelligence',state.sessionId);toast('Advisor generated: '+JSON.stringify(r.generated));await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function generateV24WeeklyReports(){try{const r=await gas('generateV24WeeklyMemberReports',state.sessionId);toast('Weekly reports generated: '+r.reports);await loadState();}catch(err){toast(err.message||String(err),true);}}
+async function completeV24Action(actionId){try{await gas('updateV24ActionStatus',state.sessionId,actionId,'Done');toast('Action marked done.');await loadState();}catch(err){toast(err.message||String(err),true);}}
+
+
+function renderV25Layout(){
+  const root = byId('layout'); if(!root) return;
+  const v = v25(), pref = v25Prefs(), hidden = v25CsvSet(pref.Hidden_Pages), collapsed = v25CsvSet(pref.Collapsed_Sections);
+  const pages = v.pages || [], presets = v.presets || [], allowed = v25AllowedPages();
+  const groups = v25Groups();
+  const groupHtml = Object.keys(groups).sort().map(cat => `
+    <div class="card compact-card">
+      <h3>${esc(cat)}</h3>
+      ${(groups[cat]||[]).map(p => {
+        const can = allowed.has(p.Page_Key) || !hidden[p.Page_Key];
+        const isHidden = !!hidden[p.Page_Key];
+        return `<label class="check v25-page-row"><input type="checkbox" ${!isHidden?'checked':''} onchange="v25ToggleHiddenPage('${esc(p.Page_Key)}', this.checked)"> ${esc(p.Label)} <small>${esc(p.Page_Key)}</small></label>`;
+      }).join('')}
+    </div>`).join('');
+  const cards = ['status','assignment','warReadiness','payouts','support','chain','advisor','training','gym','onboarding','scanner','knowledge','awards','mentor','visuals','economy','applications','risks'];
+  root.innerHTML = `
+    <div class="grid two">
+      <div class="card">
+        <h3>My website layout</h3>
+        <p class="muted">Hide pages from your own menu, choose a default landing page, and collapse noisy sections. Leaders can still control what roles are allowed to access.</p>
+        <label>Default page</label>
+        <select id="v25DefaultPage">${pages.map(p=>`<option value="${esc(p.Page_Key)}" ${String(pref.Default_Page||'dashboard')===p.Page_Key?'selected':''}>${esc(p.Label)}</option>`).join('')}</select>
+        <label>Homepage cards, comma-separated</label>
+        <input id="v25HomeCards" value="${esc(pref.Homepage_Cards||'')}" placeholder="assignment,warReadiness,payouts,support,training">
+        <button onclick="v25SaveLayoutPrefs()">Save layout</button>
+        <button class="secondary" onclick="v25ResetLayout()">Reset my layout</button>
+      </div>
+      <div class="card">
+        <h3>Layout presets</h3>
+        <p class="muted">Apply a preset, then tweak your hidden pages below.</p>
+        <select id="v25Preset">${presets.map(p=>`<option>${esc(p.Preset_Name)}</option>`).join('')}</select>
+        <button onclick="v25ApplyPreset()">Apply preset</button>
+        ${table(presets, ['Preset_Name','Description','Role_Target'])}
+      </div>
+    </div>
+    <div class="card"><h3>Collapsible page sections</h3><p class="muted">These keys are used by newer cards and dashboards. More sections can be added as pages are upgraded.</p>${cards.map(c=>`<label class="check"><input type="checkbox" ${collapsed[c]?'checked':''} onchange="v25ToggleCollapsed('${c}', this.checked)"> Collapse ${esc(c)}</label>`).join('')}</div>
+    <div class="card"><h3>Hide/show pages in my menu</h3><div class="grid three">${groupHtml}</div></div>`;
+}
+function renderV25Permissions(){
+  const root = byId('permissions'); if(!root) return;
+  const v = v25(), rows = v.rolePermissions || [];
+  const isLeader = v25IsAdminSession();
+  root.innerHTML = `
+    <div class="card"><h3>Role-based page visibility</h3><p class="muted">This hides pages from users below the selected role. It is a website navigation/access layer; sensitive sheet access is still controlled by Apps Script session role and backend functions.</p>${isLeader?'<button onclick="v25SeedPermissions()">Repair/seed permissions</button>':'<p class="muted">Leader access required to edit permissions.</p>'}</div>
+    <div class="card"><h3>Pages</h3>${v25PermissionsTable(rows, isLeader)}</div>`;
+}
+function v25PermissionsTable(rows, canEdit){
+  const roles = ['PUBLIC','APPLICANT','MEMBER','CORE','OFFICER','LEADER','DEVELOPER'];
+  if(!rows.length) return '<p class="muted">No permission rows yet. Run setupShadowCoreV25LayoutPermissions().</p>';
+  return `<div class="tablewrap"><table><thead><tr><th>Page</th><th>Category</th><th>Minimum role</th><th>Enabled</th><th>Save</th></tr></thead><tbody>${rows.map(r=>{
+    const id = 'perm_'+String(r.Page_Key).replace(/[^a-z0-9_]/gi,'_');
+    return `<tr><td><b>${esc(r.Label||r.Page_Key)}</b><br><small>${esc(r.Page_Key)}</small></td><td>${esc(r.Category||'')}</td><td><select id="${id}_role" ${canEdit?'':'disabled'}>${roles.map(role=>`<option ${String(r.Min_Role||'MEMBER')===role?'selected':''}>${role}</option>`).join('')}</select></td><td><select id="${id}_enabled" ${canEdit?'':'disabled'}><option ${String(r.Enabled).toUpperCase()!=='FALSE'?'selected':''}>TRUE</option><option ${String(r.Enabled).toUpperCase()==='FALSE'?'selected':''}>FALSE</option></select></td><td>${canEdit?`<button onclick="v25SavePermission('${esc(r.Page_Key)}','${id}')">Save</button>`:''}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+async function v25SaveLayoutPrefs(){
+  try{await gas('updateV25UserPreferences', state.sessionId, {Default_Page:val('v25DefaultPage'), Homepage_Cards:val('v25HomeCards')}); toast('Layout saved.'); await loadState();}catch(err){toast(err.message||String(err),true);}
+}
+async function v25ToggleHiddenPage(pageKey, visible){
+  const pref = v25Prefs(), set = v25CsvSet(pref.Hidden_Pages);
+  set[pageKey] = !visible;
+  try{await gas('updateV25UserPreferences', state.sessionId, {Hidden_Pages:v25SetToCsv(set)}); toast('Menu preference saved.'); await loadState();}catch(err){toast(err.message||String(err),true);}
+}
+async function v25ToggleCollapsed(sectionKey, collapsed){
+  const pref = v25Prefs(), set = v25CsvSet(pref.Collapsed_Sections);
+  set[sectionKey] = collapsed;
+  try{await gas('updateV25UserPreferences', state.sessionId, {Collapsed_Sections:v25SetToCsv(set)}); toast('Collapse preference saved.'); await loadState();}catch(err){toast(err.message||String(err),true);}
+}
+async function v25ApplyPreset(){
+  try{await gas('applyV25LayoutPreset', state.sessionId, val('v25Preset')); toast('Preset applied.'); await loadState();}catch(err){toast(err.message||String(err),true);}
+}
+async function v25ResetLayout(){
+  try{await gas('resetV25MyLayout', state.sessionId); toast('Layout reset.'); await loadState();}catch(err){toast(err.message||String(err),true);}
+}
+async function v25SavePermission(pageKey, id){
+  try{await gas('saveV25RolePermission', state.sessionId, pageKey, val(id+'_role'), val(id+'_enabled')); toast('Permission saved.'); await loadState();}catch(err){toast(err.message||String(err),true);}
+}
+async function v25SeedPermissions(){
+  try{
+    if (typeof google !== 'undefined') {
+      try { await gas('repairV25AdminBypassPermissions'); } catch(e) {}
+    }
+    await gas('setupShadowCoreV25LayoutPermissions');
+    toast('v2.5 permissions repaired/seeded.');
+    await loadState();
+  }catch(err){toast(err.message||String(err),true);}
+}
+
+function byId(id){return document.getElementById(id);}
+function val(id){const el=byId(id);return el?el.value:'';}
+</script>
