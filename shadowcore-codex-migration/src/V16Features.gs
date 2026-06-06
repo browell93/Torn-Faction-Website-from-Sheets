@@ -189,7 +189,7 @@ function issueMemberTokenFromWeb(sessionId, form) {
   return {ok:true, token:token, fingerprint:row.Token_Fingerprint, expires:expires};
 }
 
-function memberTokenLogin(token) {
+function memberTokenLoginLegacy_(token) {
   var fp = fingerprint_(String(token || ''));
   var raw = getScriptProps_().getProperty('MEMBER_TOKEN_' + fp);
   if (!raw) throw new Error('Invalid member token.');
