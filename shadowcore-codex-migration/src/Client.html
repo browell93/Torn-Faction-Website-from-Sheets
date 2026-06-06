@@ -599,23 +599,13 @@ function dashboardHasData_(obj) {
 }
 
 function dashboardSummaryForRender_() {
-  const d = state.data || {};
-  const summary = Object.assign({}, d.dashboard || {});
-  const identity = currentIdentity_();
-  const status = firstDataObject_(d.myStatus, d.v2612MyData && d.v2612MyData.status);
-  const tornId = identity.Torn_ID || status.Torn_ID || '';
-  if (!tornId) return summary;
+  return Object.assign({}, (state.data || {}).dashboard || {});
+}
 
-  if (!Number(summary.members || 0)) summary.members = 1;
-  const hasStatusCounts = Number(summary.available || 0) || Number(summary.hospitalized || 0) || Number(summary.jailed || 0) || Number(summary.traveling || 0);
-  if (!hasStatusCounts && dashboardHasData_(status)) {
-    const text = String(status.Status || status.state || '').toLowerCase();
-    if (text.includes('hospital')) summary.hospitalized = 1;
-    else if (text.includes('jail')) summary.jailed = 1;
-    else if (text.includes('travel') || text.includes('abroad')) summary.traveling = 1;
-    else summary.available = 1;
-  }
-  return summary;
+function dashboardDataNotice_(summary) {
+  const identity = currentIdentity_();
+  if (Number(summary.members || 0) || !identity.Torn_ID) return '';
+  return '<div class="warnbox">Faction aggregate data has not synced yet. Reconnect with a key that includes faction basic access or have leadership run a full sync; personal API status below may still be current.</div>';
 }
 
 function dashboardMemberStatusesForRender_() {
@@ -634,7 +624,9 @@ function renderDashboard() {
   const d = state.data || {}, s = dashboardSummaryForRender_(), announcements = d.announcements || [];
   const events = (d.events || []).slice(-5).reverse();
   const memberStatuses = dashboardMemberStatusesForRender_();
+  const dataNotice = dashboardDataNotice_(s);
   byId('dashboard').innerHTML = `
+    ${dataNotice}
     <div class="grid four">
       ${kpi('Members', s.members ?? 0)}
       ${kpi('Available', s.available ?? 0, 'status-ok')}

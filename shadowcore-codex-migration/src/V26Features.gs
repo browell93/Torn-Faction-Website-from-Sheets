@@ -125,24 +125,6 @@ function v26RowsWithSessionStatus_(rows, session, status) {
   return rows;
 }
 
-function v26DashboardWithSessionFallback_(summary, session, status, identity) {
-  summary = summary || {};
-  session = session || {};
-  status = status || {};
-  identity = identity || {};
-  var tornId = String(status.Torn_ID || identity.Torn_ID || session.tornId || '');
-  if (!tornId) return summary;
-  if (!Number(summary.members || 0)) summary.members = 1;
-  var hasStatusCounts = Number(summary.available || 0) || Number(summary.hospitalized || 0) || Number(summary.jailed || 0) || Number(summary.traveling || 0);
-  if (!hasStatusCounts && Object.keys(status).length) {
-    var text = String(status.Status || status.state || '').toLowerCase();
-    if (text.indexOf('hospital') !== -1) summary.hospitalized = 1;
-    else if (text.indexOf('jail') !== -1) summary.jailed = 1;
-    else if (text.indexOf('travel') !== -1 || text.indexOf('abroad') !== -1) summary.traveling = 1;
-    else summary.available = 1;
-  }
-  return summary;
-}
 
 function v26AddPageData_(data, session, role, page) {
   var L = Number(setting_('Performance_Row_Limit_Default','150')) || 150;
