@@ -105,6 +105,7 @@ function createSession_(user) {
     apiLogin: !!user.apiLogin,
     adminToken: !!user.adminToken,
     memberTokenLogin: !!user.memberTokenLogin,
+    authBridge: user.authBridge ? scAuthSerializable_(user.authBridge) : null,
     lastLogin: nowIso_(),
     created: nowIso_(),
     expires: new Date(Date.now() + persistentSeconds * 1000).toISOString(),
@@ -1136,7 +1137,7 @@ function scAuthSessionResponse_(session, source, extra) {
     authSource: authSource,
     source: source || authSource,
     lastAuthError: scAuthGetLastError_(),
-    version: '2.6.21'
+    version: '2.6.22'
   };
   if (extra) {
     if (extra.autoMemberApiSync !== undefined) out.autoMemberApiSync = scAuthSummarizeAutoSync_(extra.autoMemberApiSync);
@@ -1178,43 +1179,59 @@ function scAuthRecordApiKeyHealth_(tornId, name, stored, status, warning) {
   } catch (e) {}
 }
 
-function scAuthHydrateApiLoginData_(key, tornId, name, stored) {
+function scAuthHydrateApiLoginData_(key, tornId, name, stored, verifiedProfile) {
   // Use the just-submitted key once, in memory, to populate the member-facing
   // sheets that My Faction Life reads. This does not store the API key unless
-  // the separate auto-sync consent path already did so.
-  var result = {ok:false, warning:'Live member data was not checked.', stored:!!stored};
+  // the separate auto-sync consent path already did so. The returned authBridge
+  // is non-sensitive identity/status metadata kept in the server session so page
+  // loads still have data even when the workbook write is delayed or a key lacks
+  // status/bars selections.
+  var profile = verifiedProfile || {};
+  var baseRow = {
+    Torn_ID:String(tornId || ''),
+    Name:String(name || profile.name || profile.Name || ''),
+    Status:'API login verified',
+    Last_Action:'',
+    Life:'', Energy:'', Nerve:'', Happy:'', Hospital_Until:'', Jail:'', Travel:'',
+    Drug_Cooldown:'', Medical_Cooldown:'', Booster_Cooldown:'', Updated:nowIso_()
+  };
+  var result = {ok:false, warning:'Live member data was not checked.', stored:!!stored, statusRow:baseRow};
   try {
     var row = null;
     if (typeof sc2614FetchOwnUser_ === 'function' && typeof sc2614BuildMemberStatusRow_ === 'function') {
       var data = sc2614FetchOwnUser_(key);
       row = sc2614BuildMemberStatusRow_(data, 'api_login_one_time');
     }
-    if (!row) row = {Torn_ID:String(tornId || ''), Name:String(name || ''), Status:'API login verified', Last_Action:'', Updated:nowIso_()};
+    row = Object.assign({}, baseRow, row || {});
     if (!row.Torn_ID) row.Torn_ID = String(tornId || '');
     if (!row.Name) row.Name = String(name || '');
     if (!row.Status) row.Status = 'API login verified';
     row.Updated = row.Updated || nowIso_();
     upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', String(row.Torn_ID), row);
     scAuthRecordApiKeyHealth_(tornId, name, stored, 'OK', '');
-    result = {ok:true, tornId:String(row.Torn_ID), name:String(row.Name || ''), status:String(row.Status || ''), stored:!!stored};
+    result = {ok:true, tornId:String(row.Torn_ID), name:String(row.Name || ''), status:String(row.Status || ''), stored:!!stored, statusRow:row};
   } catch (err) {
     var warning = String(err && err.message || err);
+    baseRow.Status = 'API login verified; live bars/cooldowns unavailable';
     // Bars/cooldowns/status may be missing from a custom key. Keep login/data
     // bridge alive by writing a minimal status row keyed by Torn_ID.
-    try {
-      upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', String(tornId || ''), {
-        Torn_ID:String(tornId || ''),
-        Name:String(name || ''),
-        Status:'API login verified; live bars/cooldowns unavailable',
-        Last_Action:'',
-        Energy:'', Life:'', Nerve:'', Happy:'', Hospital_Until:'', Travel_Status:'',
-        Drug_Cooldown:'', Medical_Cooldown:'', Booster_Cooldown:'', Updated:nowIso_()
-      });
-    } catch (rowErr) {}
+    try { upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', String(tornId || ''), baseRow); } catch (rowErr) {}
     scAuthRecordApiKeyHealth_(tornId, name, stored, 'Login verified; live data unavailable', warning);
-    result = {ok:false, tornId:String(tornId || ''), name:String(name || ''), warning:warning, stored:!!stored};
+    result = {ok:false, tornId:String(tornId || ''), name:String(name || ''), warning:warning, stored:!!stored, statusRow:baseRow};
   }
-  return result;
+  result.identity = {
+    Torn_ID:String(tornId || ''),
+    Name:String(name || ''),
+    Role:String(findMemberRole_(tornId) || 'MEMBER'),
+    Profile_URL:tornId ? 'https://www.torn.com/profiles.php?XID=' + tornId : '',
+    Source:'API login session bridge'
+  };
+  result.apiHealth = {
+    Torn_ID:String(tornId || ''), Name:String(name || ''), Stored:stored ? 'TRUE' : 'FALSE',
+    Status:result.ok ? 'OK' : 'Login verified; live data unavailable',
+    Risk_Level:result.warning ? 'Warning' : 'OK', Missing_Selections:String(result.warning || ''), Last_Checked:nowIso_()
+  };
+  return scAuthSerializable_(result);
 }
 
 function scAuthCreateApiSession_(key, consent) {
@@ -1276,10 +1293,14 @@ function scAuthCreateApiSession_(key, consent) {
     autoSyncResult = {ok:false, warning:'Auto-sync consent was given, but Store_Member_Keys is disabled in Settings.'};
   }
 
-  var session = createSession_({tornId:tornId, name:name, role:role, authSource:'TORN_API_KEY', apiLogin:true, adminToken:false});
+  var oneTimeDataSync = scAuthHydrateApiLoginData_(key, tornId, name, storeKeys, profile);
+  var session = createSession_({
+    tornId:tornId, name:name, role:role, authSource:'TORN_API_KEY', apiLogin:true, adminToken:false,
+    authBridge:{identity:oneTimeDataSync.identity || null, status:oneTimeDataSync.statusRow || null, apiHealth:oneTimeDataSync.apiHealth || null, oneTimeDataSync:oneTimeDataSync}
+  });
   session.autoMemberApiSync = autoSyncResult;
   session.apiVerify = {ok:true, method:verified.method, warnings:verified.warnings || []};
-  session.oneTimeDataSync = scAuthHydrateApiLoginData_(key, tornId, name, storeKeys);
+  session.oneTimeDataSync = oneTimeDataSync;
   logAudit_(name, 'scAuthLogin.TORN_API_KEY', 'Verified key fingerprint ' + fp + ', method=' + verified.method + ', stored=' + storeKeys + ', autoSync=' + safeJson_(autoSyncResult || {}).slice(0, 500) + ', oneTimeData=' + safeJson_(session.oneTimeDataSync || {}).slice(0, 500));
   return session;
 }
@@ -1346,7 +1367,7 @@ function scAuthLoginLean(mode, credential, consent, previousSessionId) {
         memberTokenLogin:!!user.memberTokenLogin
       },
       authSource:String(user.authSource || mode),
-      version:'2.6.21-lean'
+      version:'2.6.22-lean'
     });
   } catch (err) {
     scAuthSetLastError_(mode + ': ' + String(err && err.message || err));
@@ -1379,7 +1400,7 @@ function getAuthDebugState(sessionId, page) {
   var validated = validateAuthSession_(sessionId);
   var session = validated.session;
   var roleValue = session ? Number(session.roleValue || 0) : 0;
-  if (!session || roleValue < roleValue_('LEADER')) throw new Error('Auth debug is admin-only. Log in with the admin token first.');
+  if (!session) throw new Error('Auth debug requires a valid logged-in session.');
   page = String(page || 'authdebug');
   var permission = {page:page, allowed:false, reason:'not checked'};
   try {
@@ -1401,6 +1422,8 @@ function getAuthDebugState(sessionId, page) {
     permission:permission,
     lastAuthError:validated.lastAuthError,
     checkedAt:nowIso_(),
-    version:'2.6.21'
+    dataProbe:(typeof v26BuildSessionDataProbe_ === 'function') ? v26BuildSessionDataProbe_(session) : {},
+    authBridge:session.authBridge || {},
+    version:'2.6.22'
   };
 }

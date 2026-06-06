@@ -142,7 +142,7 @@ function validateLoginSession_(session, source) {
   // v2.6.16+ supports either a direct session object or a wrapped {ok, session}.
   if (session && session.session && typeof session.session === 'object') session = session.session;
   if (!session || typeof session !== 'object') {
-    throw new Error(source + ' failed: the server returned no session. Redeploy Security.gs/Client.html v2.6.21, then hard-refresh the web app.');
+    throw new Error(source + ' failed: the server returned no session. Redeploy Security.gs/Client.html v2.6.22, then hard-refresh the web app.');
   }
   if (session.ok === false) {
     throw new Error(source + ' failed: ' + (session.error || session.message || 'Unknown server error.'));
@@ -331,6 +331,18 @@ async function connectKey() {
     try { document.getElementById('apiKeyInput').value = ''; } catch (e) {}
     const autoSync = session.autoMemberApiSync || {};
     const oneTimeData = session.oneTimeDataSync || {};
+    // Seed the just-verified, non-sensitive API login bridge immediately. The
+    // server also stores this in the session, but seeding it here prevents the UI
+    // from showing empty cards while the first lazy page request catches up.
+    state.data = state.data || {};
+    state.data.myIdentity = oneTimeData.identity || state.data.myIdentity || baseUser;
+    state.data.myStatus = oneTimeData.statusRow || state.data.myStatus || {};
+    state.data.myApiKeyHealth = oneTimeData.apiHealth || state.data.myApiKeyHealth || {};
+    state.data.v2612MyData = Object.assign({}, state.data.v2612MyData || {}, {
+      identity: state.data.myIdentity,
+      status: state.data.myStatus,
+      apiHealth: state.data.myApiKeyHealth
+    });
     if (autoSync && autoSync.ok) {
       toast('Connected as ' + (session.user && session.user.name ? session.user.name : 'member') + '. Auto sync is active.');
     } else if (oneTimeData && oneTimeData.warning) {
@@ -489,12 +501,17 @@ function v25AllowedPages(){
   const allNav = Array.from(document.querySelectorAll('.nav')).map(b => normalizePageKey(b.dataset.page)).filter(Boolean);
   if (v25IsAdminSession()) return new Set(base.concat(allNav).concat(Array.from(v25CriticalAdminPages())));
   if (!v25HasPermissionPayload()) return new Set(base.concat(allNav));
-  return new Set((v25().allowedPages || []).map(normalizePageKey).concat(base));
+  const allowed = new Set((v25().allowedPages || []).map(normalizePageKey).concat(base));
+  if (activeSession_()) allowed.add('authdebug');
+  return allowed;
 }
 function v25CanView(page){
   page = normalizePageKey(page);
   // Admin-token / Leader sessions must never be locked out of the permissions tools.
   if (v25IsAdminSession()) return true;
+  // Auth Debug is intentionally available to any authenticated session so API
+  // login/data-load problems can be diagnosed without switching back to admin.
+  if (page === 'authdebug' && activeSession_()) return true;
   // Do not force direct links back to dashboard while permissions are still loading,
   // and do not let missing v25 sheets break page routing. Backend still controls data.
   if (!v25HasPermissionPayload()) return true;
@@ -936,7 +953,8 @@ function renderV13MyLife() {
     <div class="grid two"><div class="card"><h3>Awards</h3>${table(life.awards || d.myAwards || direct.awards || [], ['Timestamp','Award','Category','Awarded_By','Notes'])}</div><div class="card"><h3>Onboarding</h3>${table(life.onboarding || d.myOnboarding || direct.onboarding || [], ['Step','Status','Assigned_To','Completed','Notes'])}</div></div>
     <div class="grid two"><div class="card"><h3>Mentor / Coaching</h3>${table(life.mentors || d.myMentorships || direct.mentors || [], ['Mentee_Name','Mentor_Name','Status','Last_Checkin','Goals','Notes'])}</div><div class="card"><h3>API Health</h3>${renderObject(life.apiHealth || d.myApiKeyHealth || direct.apiHealth || {})}</div></div>
     <div class="card"><h3>Direct member data bridge</h3>${direct && Object.keys(direct).length ? renderObject(direct.counts || {}) : '<p class="muted">Direct bridge did not return data yet.</p>'}<button class="secondary" onclick="debugMyDataV2612()">Debug My Data</button></div>
-    <div class="card"><h3>Data troubleshooting</h3><p class="muted">This page matches records by Torn_ID. If your identity shows but sections are empty, the site is working; you just do not have matching rows yet in those modules. Check Members, Member_Status, API_Key_Health, Payouts, Awards, Onboarding, Training_Tracker, and scanner readiness snapshots for your Torn ID.</p><button onclick="loadPageDataV26('mylife')">Refresh My Data</button><button class="secondary" onclick="showPage('scannerinstall',true)">Scanner Setup</button></div>`;
+    <div class="card"><h3>Data probe</h3>${renderObject(d.authDataProbe || {})}</div>
+    <div class="card"><h3>Data troubleshooting</h3><p class="muted">This page matches records by Torn_ID. If your identity shows but sections are empty, the site is working; you just do not have matching rows yet in those modules. Check Members, Member_Status, API_Key_Health, Payouts, Awards, Onboarding, Training_Tracker, and scanner readiness snapshots for your Torn ID.</p><button onclick="loadPageDataV26('mylife')">Refresh My Data</button><button class="secondary" onclick="showPage('authdebug',true)">Auth Debug</button><button class="secondary" onclick="showPage('scannerinstall',true)">Scanner Setup</button></div>`;
 }
 
 function renderAuthDebug() {
@@ -951,8 +969,9 @@ function renderAuthDebug() {
     Client_Name: (activeSession_() && activeSession_().name) || ''
   };
   byId('authdebug').innerHTML = `
-    <div class="card"><h3>Auth Debug</h3><p class="muted">Admin-only session diagnostics. This page does not display or store API keys in the browser.</p></div>
+    <div class="card"><h3>Auth Debug</h3><p class="muted">Session diagnostics for the current login. This page never displays or stores API keys in the browser.</p></div>
     <div class="grid two"><div class="card"><h3>Browser auth state</h3>${renderObject(browser)}</div><div class="card"><h3>Backend validation</h3>${dbg.ok ? renderObject({Role:dbg.role, Role_Value:dbg.roleValue, Auth_Source:dbg.authSource, Torn_ID:dbg.tornId, Name:dbg.name, Checked_At:dbg.checkedAt}) : '<p class="warnbox">'+esc(dbg.error || 'Auth debug unavailable.')+'</p>'}</div></div>
+    <div class="grid two"><div class="card"><h3>Data probe</h3>${renderObject(dbg.dataProbe || d.authDataProbe || {})}</div><div class="card"><h3>API login bridge</h3>${renderObject(dbg.authBridge || {})}</div></div>
     <div class="grid two"><div class="card"><h3>Permission result</h3>${renderObject(dbg.permission || {})}</div><div class="card"><h3>Last auth error</h3><pre class="codebox">${esc(dbg.lastAuthError || 'No auth errors recorded.')}</pre></div></div>
     <div class="card"><h3>Validated session payload</h3><pre class="codebox">${esc(JSON.stringify(dbg.validatedSession || {}, null, 2))}</pre></div>`;
 }

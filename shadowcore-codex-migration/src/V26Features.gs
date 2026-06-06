@@ -22,7 +22,7 @@ function getPageStateV26(sessionId, page) {
   var data = {
     public: getPublicStateV26_(page),
     session: session,
-    v26: {version:'2.6.20', page:page, lazy:true, authValidated:!!(auth && auth.ok), lastAuthError:(auth && auth.lastAuthError) || ''}
+    v26: {version:'2.6.22', page:page, lazy:true, authValidated:!!(auth && auth.ok), lastAuthError:(auth && auth.lastAuthError) || ''}
   };
   if (page === 'authdebug') {
     data.authDebug = (typeof getAuthDebugState === 'function') ? v26SafeCall_(function(){ return getAuthDebugState(sessionId, page); }, {ok:false, error:'Auth debug unavailable or denied.'}) : {ok:false, error:'Auth debug function missing.'};
@@ -68,26 +68,34 @@ function v26AddCommonMemberData_(data, session, page) {
   if (typeof v2612NormalizeSession_ === 'function') session = v2612NormalizeSession_(session);
   // v2.6.11: Always return a lightweight identity payload for logged-in users,
   // so member-facing pages can show the user even before scanner/status rows exist.
+  var bridge = session.authBridge || {};
   data.myIdentity = v26SafeCall_(function(){
     var m = (typeof memberById_ === 'function') ? (memberById_(session.tornId) || {}) : {};
+    var b = bridge.identity || {};
     return {
-      Torn_ID: m.Torn_ID || session.tornId || '',
-      Name: m.Name || session.name || '',
-      Role: m.Role || session.role || '',
+      Torn_ID: m.Torn_ID || b.Torn_ID || session.tornId || '',
+      Name: m.Name || b.Name || session.name || '',
+      Role: m.Role || b.Role || session.role || '',
       Discord: m.Discord || '',
       Active: m.Active || '',
       Last_Seen: m.Last_Seen || '',
-      Profile_URL: m.Profile_URL || (session.tornId && session.tornId !== 'LEADER' ? 'https://www.torn.com/profiles.php?XID=' + session.tornId : '')
+      Profile_URL: m.Profile_URL || b.Profile_URL || (session.tornId && session.tornId !== 'LEADER' ? 'https://www.torn.com/profiles.php?XID=' + session.tornId : '')
     };
-  }, {Torn_ID: session.tornId || '', Name: session.name || '', Role: session.role || ''});
+  }, bridge.identity || {Torn_ID: session.tornId || '', Name: session.name || '', Role: session.role || ''});
 
   // These are small single-user lookups; include them for most member pages so
   // renderers have fallback data even when a page-specific module is empty.
   if (/^(dashboard|mylife|mobile|admin|myadvisor|membereducation|weeklyreport|availabilitycal|training|payouts|loans|revives|awards|onboarding|mentors|gymgains)$/i.test(String(page))) {
     data.myScorecard = v26SafeCall_(function(){ return myScorecard_(session.tornId); }, null);
-    data.myStatus = v26SafeCall_(function(){ return myStatus_(session.tornId); }, null);
-    data.myApiKeyHealth = v26SafeCall_(function(){ return v26ReadByTorn_(APP.SHEETS.API_KEY_HEALTH, session.tornId, 1).slice(-1)[0] || {}; }, {});
+    data.myStatus = v26SafeCall_(function(){ return myStatus_(session.tornId); }, null) || bridge.status || null;
+    if ((!data.myStatus || Object.keys(data.myStatus).length === 0) && bridge.status) data.myStatus = bridge.status;
+    data.myApiKeyHealth = v26SafeCall_(function(){ return v26ReadByTorn_(APP.SHEETS.API_KEY_HEALTH, session.tornId, 1).slice(-1)[0] || {}; }, {}) || {};
+    if ((!data.myApiKeyHealth || Object.keys(data.myApiKeyHealth).length === 0) && bridge.apiHealth) data.myApiKeyHealth = bridge.apiHealth;
     data.v2612MyData = (typeof v2612BuildMyData_ === 'function') ? v26SafeCall_(function(){ return v2612BuildMyData_(session); }, {}) : {};
+    data.v2612MyData.identity = data.v2612MyData.identity || data.myIdentity || bridge.identity || {};
+    if ((!data.v2612MyData.status || Object.keys(data.v2612MyData.status).length === 0) && data.myStatus) data.v2612MyData.status = data.myStatus;
+    if ((!data.v2612MyData.apiHealth || Object.keys(data.v2612MyData.apiHealth).length === 0) && data.myApiKeyHealth) data.v2612MyData.apiHealth = data.myApiKeyHealth;
+    data.authDataProbe = v26BuildSessionDataProbe_(session, data);
   }
 
   if (page === 'dashboard') {
@@ -150,6 +158,15 @@ function v26AddPageData_(data, session, role, page) {
     case 'settings': data.settings=role>=APP.ROLES.LEADER?publicSettings_():{}; break;
     case 'admin': if(role>=APP.ROLES.LEADER){ data.members=v26Read_(APP.SHEETS.MEMBERS,L); data.memberStatuses=(typeof v22MergedMemberStatuses_==='function'?v26SafeCall_(function(){return v22MergedMemberStatuses_().slice(-L);},[]):v26Read_(APP.SHEETS.MEMBER_STATUS,L)); data.errors=v26Read_(APP.SHEETS.ERRORS,50); data.audit=v26Read_(APP.SHEETS.AUDIT_LOG,50); data.settings=publicSettings_(); } break;
   }
+  var bridge = session.authBridge || {};
+  if ((!data.myIdentity || !Object.keys(data.myIdentity).length) && bridge.identity) data.myIdentity = bridge.identity;
+  if ((!data.myStatus || !Object.keys(data.myStatus).length) && bridge.status) data.myStatus = bridge.status;
+  if ((!data.myApiKeyHealth || !Object.keys(data.myApiKeyHealth).length) && bridge.apiHealth) data.myApiKeyHealth = bridge.apiHealth;
+  data.v2612MyData = data.v2612MyData || {};
+  if ((!data.v2612MyData.identity || !Object.keys(data.v2612MyData.identity).length) && data.myIdentity) data.v2612MyData.identity = data.myIdentity;
+  if ((!data.v2612MyData.status || !Object.keys(data.v2612MyData.status).length) && data.myStatus) data.v2612MyData.status = data.myStatus;
+  if ((!data.v2612MyData.apiHealth || !Object.keys(data.v2612MyData.apiHealth).length) && data.myApiKeyHealth) data.v2612MyData.apiHealth = data.myApiKeyHealth;
+  data.authDataProbe = v26BuildSessionDataProbe_(session, data);
 }
 
 
@@ -172,6 +189,40 @@ function getMyFactionLifeV2611_(session) {
   return life;
 }
 
+
+function v26BuildSessionDataProbe_(session, data) {
+  session = (typeof v2612NormalizeSession_ === 'function') ? v2612NormalizeSession_(session || {}) : (session || {});
+  data = data || {};
+  var tornId = String(session.tornId || '');
+  function countRows(sheet, keys) {
+    try {
+      keys = keys || ['Torn_ID'];
+      var rows = v26Read_(sheet, 9999, function(r){
+        for (var i=0;i<keys.length;i++) if (String(r[keys[i]] || '') === tornId) return true;
+        return false;
+      });
+      return rows.length;
+    } catch (e) { return -1; }
+  }
+  return {
+    Torn_ID:tornId,
+    Session_Name:session.name || '',
+    Role:session.role || '',
+    Auth_Source:session.authSource || '',
+    Bridge_Status:!!(session.authBridge && session.authBridge.status),
+    Members:countRows(APP.SHEETS.MEMBERS),
+    Member_Status:countRows(APP.SHEETS.MEMBER_STATUS),
+    API_Key_Health:countRows(APP.SHEETS.API_KEY_HEALTH),
+    Payouts:countRows(APP.SHEETS.PAYOUTS),
+    Awards:countRows(APP.SHEETS.AWARDS),
+    Onboarding:countRows(APP.SHEETS.ONBOARDING),
+    Mentorships:countRows(APP.SHEETS.MENTORSHIPS, ['Torn_ID','Mentee_ID','Mentor_ID','Member_ID']),
+    Rendered_Identity:!!(data.myIdentity && (data.myIdentity.Torn_ID || data.myIdentity.Name)),
+    Rendered_Status:!!(data.myStatus && Object.keys(data.myStatus).length),
+    Checked_At:nowIso_()
+  };
+}
+
 function v26Read_(sheetName, limit, filterFn) {
   try {
     var rows = readTable_(sheetName) || [];
@@ -189,6 +240,9 @@ function v26SafeCall_(fn, fallback) { try { return fn(); } catch (e) { return fa
 /** v2.6.12 - Robust member/session data bridge. */
 function v2612NormalizeSession_(session) {
   if (!session) return session;
+  if (session.user && typeof session.user === 'object') {
+    session = Object.assign({}, session.user, {sessionId: session.sessionId || session.user.sessionId || ''});
+  }
   var tornId = session.tornId || session.Torn_ID || session.TornId || session.torn_id || session.player_id || session.Player_ID || session.user_id || session.User_ID || session.id || session.ID || '';
   var name = session.name || session.Name || session.player_name || session.Player_Name || session.username || session.Username || '';
   var role = session.role || session.Role || 'MEMBER';

@@ -79,7 +79,7 @@ function v25PageDefs_() {
     ['comms','Comms & Reports','Admin','OFFICER'],
     ['settings','Settings','Admin','LEADER'],
     ['admin','Admin','Admin','LEADER'],
-    ['authdebug','Auth Debug','Admin','LEADER'],
+    ['authdebug','Auth Debug','Admin','MEMBER'],
     ['layout','My Layout','Personalization','MEMBER'],
     ['permissions','Page Permissions','Admin','LEADER']
   ].map(function(r){return {Page_Key:r[0], Label:r[1], Category:r[2], Default_Min_Role:r[3]};});
@@ -344,6 +344,7 @@ function v25EffectivePagesForSession_(session, perms, pref) {
     out.push(key);
   });
   if (out.indexOf('layout') === -1 && rv >= APP.ROLES.MEMBER) out.push('layout');
+  if (out.indexOf('authdebug') === -1 && rv >= APP.ROLES.MEMBER) out.push('authdebug');
   if (isAdmin) {
     Object.keys(critical).forEach(function(k){ if (out.indexOf(k) === -1) out.push(k); });
   }
