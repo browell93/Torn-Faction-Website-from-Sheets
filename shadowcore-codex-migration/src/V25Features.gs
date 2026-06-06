@@ -79,6 +79,7 @@ function v25PageDefs_() {
     ['comms','Comms & Reports','Admin','OFFICER'],
     ['settings','Settings','Admin','LEADER'],
     ['admin','Admin','Admin','LEADER'],
+    ['authdebug','Auth Debug','Admin','LEADER'],
     ['layout','My Layout','Personalization','MEMBER'],
     ['permissions','Page Permissions','Admin','LEADER']
   ].map(function(r){return {Page_Key:r[0], Label:r[1], Category:r[2], Default_Min_Role:r[3]};});
@@ -350,7 +351,7 @@ function v25EffectivePagesForSession_(session, perms, pref) {
 }
 
 function v25CriticalAdminPages_() {
-  var keys = ['permissions','layout','settings','admin','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme'];
+  var keys = ['permissions','layout','settings','admin','authdebug','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme'];
   var out = {};
   keys.forEach(function(k){ out[k] = true; });
   return out;

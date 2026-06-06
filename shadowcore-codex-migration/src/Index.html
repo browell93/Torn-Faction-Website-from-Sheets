@@ -89,6 +89,7 @@
       <button data-page="settings" class="nav">Settings</button>
       <button data-page="permissions" class="nav">Page Permissions</button>
       <button data-page="admin" class="nav">Admin</button>
+      <button data-page="authdebug" class="nav">Auth Debug</button>
     </aside>
 
     <main>
@@ -116,6 +117,7 @@
             <label>Selections / access level you granted</label>
             <input id="selectionsInput" placeholder="Example: key info,user profile,status,attacks">
             <label class="check"><input type="checkbox" id="consentInput"> I understand and accept the API disclosure.</label>
+            <label class="check"><input type="checkbox" id="autoSyncConsentInput"> Store my key server-side for auto-sync.</label>
             <button id="connectBtn">Connect Key</button>
           </div>
           <div>
@@ -205,6 +207,7 @@
       <section id="settings" class="page"></section>
       <section id="permissions" class="page"></section>
       <section id="admin" class="page"></section>
+      <section id="authdebug" class="page"></section>
     </main>
   </div>
   <?!= include('Client'); ?>
