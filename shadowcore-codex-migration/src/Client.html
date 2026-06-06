@@ -594,9 +594,46 @@ function renderDashboardProfile_() {
   </div>`;
 }
 
+function dashboardHasData_(obj) {
+  return !!(obj && typeof obj === 'object' && Object.keys(obj).some(k => obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== ''));
+}
+
+function dashboardSummaryForRender_() {
+  const d = state.data || {};
+  const summary = Object.assign({}, d.dashboard || {});
+  const identity = currentIdentity_();
+  const status = firstDataObject_(d.myStatus, d.v2612MyData && d.v2612MyData.status);
+  const tornId = identity.Torn_ID || status.Torn_ID || '';
+  if (!tornId) return summary;
+
+  if (!Number(summary.members || 0)) summary.members = 1;
+  const hasStatusCounts = Number(summary.available || 0) || Number(summary.hospitalized || 0) || Number(summary.jailed || 0) || Number(summary.traveling || 0);
+  if (!hasStatusCounts && dashboardHasData_(status)) {
+    const text = String(status.Status || status.state || '').toLowerCase();
+    if (text.includes('hospital')) summary.hospitalized = 1;
+    else if (text.includes('jail')) summary.jailed = 1;
+    else if (text.includes('travel') || text.includes('abroad')) summary.traveling = 1;
+    else summary.available = 1;
+  }
+  return summary;
+}
+
+function dashboardMemberStatusesForRender_() {
+  const d = state.data || {};
+  const rows = (d.memberStatuses || (v22().memberStatusesMerged || [])).slice();
+  const identity = currentIdentity_();
+  const status = firstDataObject_(d.myStatus, d.v2612MyData && d.v2612MyData.status);
+  const tornId = identity.Torn_ID || status.Torn_ID || '';
+  if (!tornId || !dashboardHasData_(status)) return rows;
+  const found = rows.some(row => String(row.Torn_ID || row.Player_ID || row.User_ID || '') === String(tornId));
+  if (!found) rows.push(Object.assign({Torn_ID: tornId, Name: identity.Name || status.Name || ''}, status));
+  return rows;
+}
+
 function renderDashboard() {
-  const d = state.data || {}, s = d.dashboard || {}, announcements = d.announcements || [];
+  const d = state.data || {}, s = dashboardSummaryForRender_(), announcements = d.announcements || [];
   const events = (d.events || []).slice(-5).reverse();
+  const memberStatuses = dashboardMemberStatusesForRender_();
   byId('dashboard').innerHTML = `
     <div class="grid four">
       ${kpi('Members', s.members ?? 0)}
@@ -618,7 +655,7 @@ function renderDashboard() {
       <div class="card"><h3>Upcoming events</h3>${table(events, ['Title','Type','Start_Time','Status','Description'])}</div>
       <div class="card"><h3>My profile</h3>${renderDashboardProfile_()}</div>
     </div>
-    <div class="card"><h3>Member live status / API fields</h3><p class="muted">Energy, nerve, happy, life, cooldowns, and hospital data fill from member API/scanner readiness snapshots when members opt in.</p>${table((d.memberStatuses || (v22().memberStatusesMerged||[])).slice().reverse(), ['Name','Status','Last_Action','Life','Energy','Nerve','Happy','Hospital_Until','Jail','Travel','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}</div>`;
+    <div class="card"><h3>Member live status / API fields</h3><p class="muted">Energy, nerve, happy, life, cooldowns, and hospital data fill from member API/scanner readiness snapshots when members opt in.</p>${table(memberStatuses.slice().reverse(), ['Name','Status','Last_Action','Life','Energy','Nerve','Happy','Hospital_Until','Jail','Travel','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}</div>`;
 }
 
 function renderWar() {
