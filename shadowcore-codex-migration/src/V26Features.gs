@@ -100,6 +100,7 @@ function v26AddCommonMemberData_(data, session, page) {
 
   if (page === 'dashboard') {
     data.dashboard = v26SafeCall_(dashboardSummary_, {});
+    data.dashboard = v26DashboardWithSessionFallback_(data.dashboard, session, data.myStatus, data.myIdentity);
     data.announcements = data.public.announcements || [];
     data.events = v26Read_(APP.SHEETS.EVENTS, 5);
     data.v22 = (typeof getV22State_ === 'function') ? v26SafeCall_(function(){ return getV22State_(session); }, {}) : {};
