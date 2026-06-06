@@ -329,8 +329,11 @@ async function connectKey() {
     replaceActiveSession_(session.sessionId, sessionObj);
     try { document.getElementById('apiKeyInput').value = ''; } catch (e) {}
     const autoSync = session.autoMemberApiSync || {};
+    const oneTimeData = session.oneTimeDataSync || {};
     if (autoSync && autoSync.ok) {
       toast('Connected as ' + (session.user && session.user.name ? session.user.name : 'member') + '. Auto sync is active.');
+    } else if (oneTimeData && oneTimeData.warning) {
+      toast('Connected, but live bars/cooldowns were not available: ' + oneTimeData.warning, true);
     } else if (autoSync && autoSync.error) {
       toast('Connected, but auto sync could not run yet: ' + autoSync.error, true);
     } else {

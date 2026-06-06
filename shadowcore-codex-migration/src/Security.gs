@@ -1141,6 +1141,7 @@ function scAuthSessionResponse_(session, source, extra) {
   if (extra) {
     if (extra.autoMemberApiSync !== undefined) out.autoMemberApiSync = scAuthSummarizeAutoSync_(extra.autoMemberApiSync);
     if (extra.apiVerify !== undefined) out.apiVerify = scAuthSummarizeApiVerify_(extra.apiVerify);
+    if (extra.oneTimeDataSync !== undefined) out.oneTimeDataSync = scAuthSerializable_(extra.oneTimeDataSync || null);
   }
   return scAuthSerializable_(out);
 }
@@ -1155,6 +1156,65 @@ function scAuthCreateAdminSession_(token) {
   var session = createSession_({tornId:'LEADER', name:'Leader', role:'LEADER', authSource:'ADMIN_TOKEN', adminToken:!!okByToken, apiLogin:false});
   logAudit_(session.user.email || 'leader', 'scAuthLogin.ADMIN_TOKEN', 'Leader/admin session created.');
   return session;
+}
+
+
+function scAuthRecordApiKeyHealth_(tornId, name, stored, status, warning) {
+  try {
+    var checkId = 'LOGIN-' + String(tornId || 'UNKNOWN') + '-' + Utilities.getUuid().slice(0, 8);
+    upsertRowByKey_(APP.SHEETS.API_KEY_HEALTH, 'Check_ID', checkId, {
+      Check_ID: checkId,
+      Timestamp: nowIso_(),
+      Torn_ID: String(tornId || ''),
+      Name: String(name || ''),
+      Stored: stored ? 'TRUE' : 'FALSE',
+      Status: String(status || 'Login verified'),
+      Last_Checked: nowIso_(),
+      Age_Days: '0',
+      Risk_Level: warning ? 'Warning' : 'OK',
+      Missing_Selections: String(warning || ''),
+      Recommended_Action: warning ? 'Login is active. Enable bars/cooldowns/status selections and opt into auto-sync if you want live My Faction Life data.' : 'None'
+    });
+  } catch (e) {}
+}
+
+function scAuthHydrateApiLoginData_(key, tornId, name, stored) {
+  // Use the just-submitted key once, in memory, to populate the member-facing
+  // sheets that My Faction Life reads. This does not store the API key unless
+  // the separate auto-sync consent path already did so.
+  var result = {ok:false, warning:'Live member data was not checked.', stored:!!stored};
+  try {
+    var row = null;
+    if (typeof sc2614FetchOwnUser_ === 'function' && typeof sc2614BuildMemberStatusRow_ === 'function') {
+      var data = sc2614FetchOwnUser_(key);
+      row = sc2614BuildMemberStatusRow_(data, 'api_login_one_time');
+    }
+    if (!row) row = {Torn_ID:String(tornId || ''), Name:String(name || ''), Status:'API login verified', Last_Action:'', Updated:nowIso_()};
+    if (!row.Torn_ID) row.Torn_ID = String(tornId || '');
+    if (!row.Name) row.Name = String(name || '');
+    if (!row.Status) row.Status = 'API login verified';
+    row.Updated = row.Updated || nowIso_();
+    upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', String(row.Torn_ID), row);
+    scAuthRecordApiKeyHealth_(tornId, name, stored, 'OK', '');
+    result = {ok:true, tornId:String(row.Torn_ID), name:String(row.Name || ''), status:String(row.Status || ''), stored:!!stored};
+  } catch (err) {
+    var warning = String(err && err.message || err);
+    // Bars/cooldowns/status may be missing from a custom key. Keep login/data
+    // bridge alive by writing a minimal status row keyed by Torn_ID.
+    try {
+      upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', String(tornId || ''), {
+        Torn_ID:String(tornId || ''),
+        Name:String(name || ''),
+        Status:'API login verified; live bars/cooldowns unavailable',
+        Last_Action:'',
+        Energy:'', Life:'', Nerve:'', Happy:'', Hospital_Until:'', Travel_Status:'',
+        Drug_Cooldown:'', Medical_Cooldown:'', Booster_Cooldown:'', Updated:nowIso_()
+      });
+    } catch (rowErr) {}
+    scAuthRecordApiKeyHealth_(tornId, name, stored, 'Login verified; live data unavailable', warning);
+    result = {ok:false, tornId:String(tornId || ''), name:String(name || ''), warning:warning, stored:!!stored};
+  }
+  return result;
 }
 
 function scAuthCreateApiSession_(key, consent) {
@@ -1219,7 +1279,8 @@ function scAuthCreateApiSession_(key, consent) {
   var session = createSession_({tornId:tornId, name:name, role:role, authSource:'TORN_API_KEY', apiLogin:true, adminToken:false});
   session.autoMemberApiSync = autoSyncResult;
   session.apiVerify = {ok:true, method:verified.method, warnings:verified.warnings || []};
-  logAudit_(name, 'scAuthLogin.TORN_API_KEY', 'Verified key fingerprint ' + fp + ', method=' + verified.method + ', stored=' + storeKeys + ', autoSync=' + safeJson_(autoSyncResult || {}).slice(0, 500));
+  session.oneTimeDataSync = scAuthHydrateApiLoginData_(key, tornId, name, storeKeys);
+  logAudit_(name, 'scAuthLogin.TORN_API_KEY', 'Verified key fingerprint ' + fp + ', method=' + verified.method + ', stored=' + storeKeys + ', autoSync=' + safeJson_(autoSyncResult || {}).slice(0, 500) + ', oneTimeData=' + safeJson_(session.oneTimeDataSync || {}).slice(0, 500));
   return session;
 }
 
@@ -1248,7 +1309,7 @@ function scAuthLogin(mode, credential, consent, previousSessionId) {
     else if (mode === 'MEMBER_TOKEN') session = scAuthCreateMemberTokenSession_(credential);
     else throw new Error('Unsupported auth mode: ' + mode + '. Expected ADMIN_TOKEN, MEMBER_TOKEN, or TORN_API_KEY.');
     scAuthClearLastError_();
-    return scAuthSessionResponse_(session, mode, {autoMemberApiSync:session.autoMemberApiSync || null, apiVerify:session.apiVerify || null});
+    return scAuthSessionResponse_(session, mode, {autoMemberApiSync:session.autoMemberApiSync || null, apiVerify:session.apiVerify || null, oneTimeDataSync:session.oneTimeDataSync || null});
   } catch (err) {
     scAuthSetLastError_(mode + ': ' + String(err && err.message || err));
     throw err;
