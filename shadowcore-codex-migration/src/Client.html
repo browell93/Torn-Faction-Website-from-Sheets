@@ -527,6 +527,28 @@ function v25Groups(){
   return grouped;
 }
 
+
+function hasDisplayData_(obj) {
+  return !!(obj && typeof obj === 'object' && Object.keys(obj).some(k => obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== ''));
+}
+function firstDataObject_(...objs) {
+  return objs.find(hasDisplayData_) || {};
+}
+function currentIdentity_() {
+  const d = state.data || {};
+  const session = activeSession_() || d.session || {};
+  const direct = d.v2612MyData || {};
+  const life = d.myFactionLife || {};
+  const raw = firstDataObject_(d.myIdentity, direct.identity, life.member, session);
+  return {
+    Torn_ID: raw.Torn_ID || raw.tornId || raw.id || session.tornId || '',
+    Name: raw.Name || raw.name || session.name || '',
+    Role: raw.Role || raw.role || session.role || '',
+    Session_Source: session.authSource || session.authMode || (session.apiLogin ? 'TORN_API_KEY' : (session.adminToken ? 'ADMIN_TOKEN' : (session.memberTokenLogin ? 'MEMBER_TOKEN' : 'Session'))),
+    Last_Login: session.lastLogin || session.created || ''
+  };
+}
+
 function renderDashboard() {
   const d = state.data || {}, s = d.dashboard || {}, announcements = d.announcements || [];
   const events = (d.events || []).slice(-5).reverse();
@@ -549,7 +571,7 @@ function renderDashboard() {
     </div>
     <div class="grid two">
       <div class="card"><h3>Upcoming events</h3>${table(events, ['Title','Type','Start_Time','Status','Description'])}</div>
-      <div class="card"><h3>My profile</h3>${renderObject(d.myStatus || {})}${renderObject(d.myScorecard || {})}</div>
+      <div class="card"><h3>My profile</h3>${renderObject(currentIdentity_())}${renderObject(firstDataObject_(d.myStatus, d.v2612MyData && d.v2612MyData.status))}${renderObject(firstDataObject_(d.myScorecard, d.v2612MyData && d.v2612MyData.scorecard))}</div>
     </div>
     <div class="card"><h3>Member live status / API fields</h3><p class="muted">Energy, nerve, happy, life, cooldowns, and hospital data fill from member API/scanner readiness snapshots when members opt in.</p>${table((d.memberStatuses || (v22().memberStatusesMerged||[])).slice().reverse(), ['Name','Status','Last_Action','Life','Energy','Nerve','Happy','Hospital_Until','Jail','Travel','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}</div>`;
 }
@@ -867,16 +889,16 @@ function renderV13MyLife() {
   const session = activeSession_() || d.session || {};
   const life = d.myFactionLife || {};
   const direct = d.v2612MyData || {};
-  const identity = Object.assign({}, direct.identity || {}, life.member || {}, {
-    Torn_ID: (life.member && life.member.Torn_ID) || (direct.identity && direct.identity.Torn_ID) || session.tornId || '',
-    Name: (life.member && life.member.Name) || (direct.identity && direct.identity.Name) || session.name || '',
-    Role: (life.member && life.member.Role) || (direct.identity && direct.identity.Role) || session.role || '',
-    Session_Source: session.authSource || session.authMode || (session.apiLogin ? 'TORN_API_KEY' : (session.adminToken ? 'ADMIN_TOKEN' : (session.memberTokenLogin ? 'MEMBER_TOKEN' : 'Session'))),
+  const identity = Object.assign({}, currentIdentity_(), direct.identity || {}, life.member || {}, {
+    Torn_ID: (life.member && life.member.Torn_ID) || (direct.identity && direct.identity.Torn_ID) || currentIdentity_().Torn_ID,
+    Name: (life.member && life.member.Name) || (direct.identity && direct.identity.Name) || currentIdentity_().Name,
+    Role: (life.member && life.member.Role) || (direct.identity && direct.identity.Role) || currentIdentity_().Role,
+    Session_Source: currentIdentity_().Session_Source,
     Session_Type: session.authSource || session.authMode || '',
-    Last_Login: session.lastLogin || session.created || ''
+    Last_Login: currentIdentity_().Last_Login
   });
-  const status = life.status || d.myStatus || direct.status || {};
-  const scorecard = life.scorecard || d.myScorecard || direct.scorecard || {};
+  const status = firstDataObject_(life.status, d.myStatus, direct.status);
+  const scorecard = firstDataObject_(life.scorecard, d.myScorecard, direct.scorecard);
   const hasIdentity = identity.Torn_ID || identity.Name;
   byId('mylife').innerHTML = `
     <div class="card"><h3>My Faction Life</h3><p class="muted">Everything relevant to your faction life in one place. If this page has only your identity, run a sync or install/enable scanner/API snapshots so status fields can fill.</p>${hasIdentity ? renderObject(identity) : '<p class="warnbox">You are logged in, but no Torn identity was returned for this session. Log out, clear site data, then log in with your API key again.</p>'}</div>
