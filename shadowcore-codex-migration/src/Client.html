@@ -494,7 +494,7 @@ function v25IsAdminSession(){
   return Number(s.roleValue || 0) >= 5 || role === 'LEADER' || role === 'DEVELOPER' || role === 'ADMIN';
 }
 function v25CriticalAdminPages(){
-  return new Set(['permissions','layout','settings','admin','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme']);
+  return new Set(['permissions','layout','settings','admin','authdebug','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme']);
 }
 function v25AllowedPages(){
   const base = ['dashboard','microsite','recruiting','privacy'];

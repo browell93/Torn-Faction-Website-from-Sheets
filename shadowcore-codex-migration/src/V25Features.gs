@@ -352,7 +352,7 @@ function v25EffectivePagesForSession_(session, perms, pref) {
 }
 
 function v25CriticalAdminPages_() {
-  var keys = ['permissions','layout','settings','admin','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme'];
+  var keys = ['permissions','layout','settings','admin','authdebug','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme'];
   var out = {};
   keys.forEach(function(k){ out[k] = true; });
   return out;
