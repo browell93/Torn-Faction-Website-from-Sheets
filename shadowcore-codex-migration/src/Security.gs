@@ -85,14 +85,27 @@ function isAdminToken_(token) {
 }
 
 function createSession_(user) {
+  user = user || {};
   var sessionId = Utilities.getUuid();
   var persistentSeconds = sessionPersistentSeconds_();
+  var requestedRole = String(user.role || 'PUBLIC').toUpperCase();
+  // Apps Script deployments in this repo historically used ADMIN for leader
+  // token sessions, but APP.ROLES does not define ADMIN. Normalize it here so
+  // the server-side session and the browser badge agree after navigation.
+  if (requestedRole === 'ADMIN') requestedRole = 'LEADER';
+  var authSource = String(user.authSource || user.authMode || '').toUpperCase();
   var payload = {
+    sessionId: sessionId,
     tornId: String(user.tornId || ''),
     name: user.name || '',
-    role: roleName_(user.role || 'PUBLIC'),
-    roleValue: roleValue_(user.role || 'PUBLIC'),
+    role: roleName_(requestedRole || 'PUBLIC'),
+    roleValue: roleValue_(requestedRole || 'PUBLIC'),
     email: user.email || Session.getActiveUser().getEmail() || '',
+    authSource: authSource || (user.apiLogin ? 'TORN_API_KEY' : (user.memberTokenLogin ? 'MEMBER_TOKEN' : (requestedRole === 'LEADER' ? 'ADMIN_TOKEN' : 'UNKNOWN'))),
+    apiLogin: !!user.apiLogin,
+    adminToken: !!user.adminToken,
+    memberTokenLogin: !!user.memberTokenLogin,
+    lastLogin: nowIso_(),
     created: nowIso_(),
     expires: new Date(Date.now() + persistentSeconds * 1000).toISOString(),
     persistent: true
@@ -117,6 +130,15 @@ function getSession_(sessionId) {
 
   try {
     var session = JSON.parse(raw);
+    session.sessionId = String(session.sessionId || sessionId);
+    if (String(session.role || '').toUpperCase() === 'ADMIN') {
+      session.role = 'LEADER';
+      session.roleValue = roleValue_('LEADER');
+      session.authSource = session.authSource || 'ADMIN_TOKEN';
+    }
+    if (!session.authSource) {
+      session.authSource = session.apiLogin ? 'TORN_API_KEY' : (session.memberTokenLogin ? 'MEMBER_TOKEN' : (Number(session.roleValue || 0) >= roleValue_('LEADER') ? 'ADMIN_TOKEN' : 'UNKNOWN'));
+    }
     if (session.expires && new Date(session.expires).getTime() < Date.now()) {
       CacheService.getScriptCache().remove(key);
       PropertiesService.getScriptProperties().deleteProperty(key);
@@ -1039,4 +1061,346 @@ function testSc2619ApiLogin(key) {
 
 function testSc2619LeaderLogin(token) {
   return sc2619LeaderLogin(token);
+}
+
+
+/**
+ * v2.6.20 - Canonical auth/session flow.
+ * Keep older sc26xx functions for compatibility, but route the web client through
+ * this single entry point and this single session validator.
+ */
+function scAuthSetLastError_(message) {
+  try { getScriptProps_().setProperty('AUTH_LAST_ERROR', String(message || '').slice(0, 2000)); } catch (e) {}
+}
+
+function scAuthGetLastError_() {
+  try { return getScriptProps_().getProperty('AUTH_LAST_ERROR') || ''; } catch (e) { return ''; }
+}
+
+function scAuthClearLastError_() {
+  try { getScriptProps_().deleteProperty('AUTH_LAST_ERROR'); } catch (e) {}
+}
+
+function scAuthSerializable_(obj) {
+  // google.script.run can return null if a payload contains Apps Script host
+  // objects, Dates, or other non-plain values. Force every auth response through
+  // JSON so login never succeeds server-side but arrives in the browser as null.
+  return JSON.parse(safeJson_(obj || {}));
+}
+
+function scAuthSummarizeAutoSync_(autoMemberApiSync) {
+  if (!autoMemberApiSync) return null;
+  return {
+    ok: autoMemberApiSync.ok === true,
+    tornId: String(autoMemberApiSync.tornId || ''),
+    name: String(autoMemberApiSync.name || ''),
+    error: String(autoMemberApiSync.error || ''),
+    warning: String(autoMemberApiSync.warning || ''),
+    status: String(autoMemberApiSync.status || autoMemberApiSync.Last_Status || '')
+  };
+}
+
+function scAuthSummarizeApiVerify_(apiVerify) {
+  if (!apiVerify) return null;
+  var warnings = apiVerify.warnings || [];
+  if (!Array.isArray(warnings)) warnings = [String(warnings || '')];
+  return {
+    ok: apiVerify.ok === true,
+    method: String(apiVerify.method || ''),
+    warningCount: warnings.length,
+    warnings: warnings.slice(0, 5).map(function(w) { return String(w || '').slice(0, 250); })
+  };
+}
+
+function scAuthSessionResponse_(session, source, extra) {
+  if (!session || !session.sessionId) throw new Error((source || 'Login') + ' failed internally: no sessionId was created.');
+  var user = session.user || session;
+  var authSource = String(user.authSource || session.authSource || source || '').toUpperCase();
+  var out = {
+    ok: true,
+    sessionId: String(session.sessionId || user.sessionId || ''),
+    expiresInSeconds: Number(session.expiresInSeconds || sessionPersistentSeconds_()),
+    user: {
+      sessionId: String(session.sessionId || user.sessionId || ''),
+      tornId: String(user.tornId || user.Torn_ID || ''),
+      name: String(user.name || user.Name || ''),
+      role: roleName_(user.role || 'MEMBER'),
+      roleValue: Number(user.roleValue || roleValue_(user.role || 'MEMBER')),
+      email: String(user.email || ''),
+      authSource: authSource,
+      lastLogin: String(user.lastLogin || user.created || nowIso_()),
+      adminToken: authSource === 'ADMIN_TOKEN' || !!user.adminToken,
+      apiLogin: authSource === 'TORN_API_KEY' || !!user.apiLogin,
+      memberTokenLogin: authSource === 'MEMBER_TOKEN' || !!user.memberTokenLogin
+    },
+    authSource: authSource,
+    source: source || authSource,
+    lastAuthError: scAuthGetLastError_(),
+    version: '2.6.21'
+  };
+  if (extra) {
+    if (extra.autoMemberApiSync !== undefined) out.autoMemberApiSync = scAuthSummarizeAutoSync_(extra.autoMemberApiSync);
+    if (extra.apiVerify !== undefined) out.apiVerify = scAuthSummarizeApiVerify_(extra.apiVerify);
+    if (extra.oneTimeDataSync !== undefined) out.oneTimeDataSync = scAuthSerializable_(extra.oneTimeDataSync || null);
+  }
+  return scAuthSerializable_(out);
+}
+
+function scAuthCreateAdminSession_(token) {
+  var mode = String(setting_('Auth_Mode', 'EmailOrToken')).toLowerCase();
+  var okByEmail = adminEmailAllowed_();
+  var okByToken = isAdminToken_(token);
+  if (mode === 'emailonly' && !okByEmail) throw new Error('Leader login requires an allowed Google email.');
+  if (mode === 'tokenonly' && !okByToken) throw new Error('Leader login requires the Admin_Token.');
+  if (mode === 'emailortoken' && !(okByEmail || okByToken)) throw new Error('Leader login failed. Use an allowed Google email or the Admin_Token.');
+  var session = createSession_({tornId:'LEADER', name:'Leader', role:'LEADER', authSource:'ADMIN_TOKEN', adminToken:!!okByToken, apiLogin:false});
+  logAudit_(session.user.email || 'leader', 'scAuthLogin.ADMIN_TOKEN', 'Leader/admin session created.');
+  return session;
+}
+
+
+function scAuthRecordApiKeyHealth_(tornId, name, stored, status, warning) {
+  try {
+    var checkId = 'LOGIN-' + String(tornId || 'UNKNOWN') + '-' + Utilities.getUuid().slice(0, 8);
+    upsertRowByKey_(APP.SHEETS.API_KEY_HEALTH, 'Check_ID', checkId, {
+      Check_ID: checkId,
+      Timestamp: nowIso_(),
+      Torn_ID: String(tornId || ''),
+      Name: String(name || ''),
+      Stored: stored ? 'TRUE' : 'FALSE',
+      Status: String(status || 'Login verified'),
+      Last_Checked: nowIso_(),
+      Age_Days: '0',
+      Risk_Level: warning ? 'Warning' : 'OK',
+      Missing_Selections: String(warning || ''),
+      Recommended_Action: warning ? 'Login is active. Enable bars/cooldowns/status selections and opt into auto-sync if you want live My Faction Life data.' : 'None'
+    });
+  } catch (e) {}
+}
+
+function scAuthHydrateApiLoginData_(key, tornId, name, stored) {
+  // Use the just-submitted key once, in memory, to populate the member-facing
+  // sheets that My Faction Life reads. This does not store the API key unless
+  // the separate auto-sync consent path already did so.
+  var result = {ok:false, warning:'Live member data was not checked.', stored:!!stored};
+  try {
+    var row = null;
+    if (typeof sc2614FetchOwnUser_ === 'function' && typeof sc2614BuildMemberStatusRow_ === 'function') {
+      var data = sc2614FetchOwnUser_(key);
+      row = sc2614BuildMemberStatusRow_(data, 'api_login_one_time');
+    }
+    if (!row) row = {Torn_ID:String(tornId || ''), Name:String(name || ''), Status:'API login verified', Last_Action:'', Updated:nowIso_()};
+    if (!row.Torn_ID) row.Torn_ID = String(tornId || '');
+    if (!row.Name) row.Name = String(name || '');
+    if (!row.Status) row.Status = 'API login verified';
+    row.Updated = row.Updated || nowIso_();
+    upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', String(row.Torn_ID), row);
+    scAuthRecordApiKeyHealth_(tornId, name, stored, 'OK', '');
+    result = {ok:true, tornId:String(row.Torn_ID), name:String(row.Name || ''), status:String(row.Status || ''), stored:!!stored};
+  } catch (err) {
+    var warning = String(err && err.message || err);
+    // Bars/cooldowns/status may be missing from a custom key. Keep login/data
+    // bridge alive by writing a minimal status row keyed by Torn_ID.
+    try {
+      upsertRowByKey_(APP.SHEETS.MEMBER_STATUS, 'Torn_ID', String(tornId || ''), {
+        Torn_ID:String(tornId || ''),
+        Name:String(name || ''),
+        Status:'API login verified; live bars/cooldowns unavailable',
+        Last_Action:'',
+        Energy:'', Life:'', Nerve:'', Happy:'', Hospital_Until:'', Travel_Status:'',
+        Drug_Cooldown:'', Medical_Cooldown:'', Booster_Cooldown:'', Updated:nowIso_()
+      });
+    } catch (rowErr) {}
+    scAuthRecordApiKeyHealth_(tornId, name, stored, 'Login verified; live data unavailable', warning);
+    result = {ok:false, tornId:String(tornId || ''), name:String(name || ''), warning:warning, stored:!!stored};
+  }
+  return result;
+}
+
+function scAuthCreateApiSession_(key, consent) {
+  key = sanitizeKey_(key);
+  consent = consent || {};
+  if (!consent.accepted) throw new Error('You must accept the API disclosure before connecting a key.');
+
+  var verified = sc2618VerifyApiKeyProfile_(key);
+  var profile = verified.profile || {};
+  var tornId = String(profile.tornId || profile.Torn_ID || profile.player_id || profile.user_id || profile.id || profile.ID || '').trim();
+  if (!tornId) throw new Error('API key checked, but Torn ID could not be read. Use a Torn API key with user -> basic or user -> profile access, then try again.');
+
+  var name = String(profile.name || profile.Name || profile.player_name || profile.username || ('Torn ' + tornId)).trim();
+  var role = findMemberRole_(tornId) || 'MEMBER';
+  var autoSyncConsent = consent.autoSync === true || String(consent.autoSync || '').toUpperCase() === 'TRUE';
+  var storeKeys = autoSyncConsent && boolSetting_('Store_Member_Keys', true);
+  var fp = keyFingerprint_(key);
+  if (storeKeys) storeApiKey_('MEMBER', tornId, key);
+
+  upsertRowByKey_(APP.SHEETS.API_KEYS, 'Torn_ID', tornId, {
+    Torn_ID: tornId,
+    Name: name,
+    Role: role,
+    Key_Type: 'MEMBER',
+    Stored: storeKeys ? 'TRUE' : 'FALSE',
+    Access_Level: verified.accessLevel || consent.accessLevel || 'Custom/Member',
+    Selections: verified.selectionsSummary || consent.selections || 'Verified from Torn API v1/v2',
+    Status: 'Verified',
+    Last_Checked: nowIso_(),
+    Key_Fingerprint: fp,
+    Owner_Email: Session.getActiveUser().getEmail() || '',
+    Consent: safeJson_({accepted:!!consent.accepted, autoSync:autoSyncConsent, discord:consent.discord || '', selections:consent.selections || ''}).slice(0, 5000),
+    Notes: storeKeys ? 'v2.6.20 verified and stored server-side for opted-in auto-sync. Actual key is stored in Script Properties, not this sheet.' : 'v2.6.20 verified for login only. API key was not stored.'
+  });
+
+  upsertRowByKey_(APP.SHEETS.MEMBERS, 'Torn_ID', tornId, {
+    Torn_ID: tornId,
+    Name: name,
+    Role: role,
+    Rank: '',
+    Joined: '',
+    Discord: consent.discord || '',
+    Active: 'TRUE',
+    Last_Seen: nowIso_(),
+    Faction_ID: profile.faction_id || profile.factionID || (profile.faction && (profile.faction.id || profile.faction.faction_id)) || '',
+    Profile_URL: 'https://www.torn.com/profiles.php?XID=' + tornId,
+    Notes: ''
+  });
+
+  var autoSyncResult = null;
+  if (storeKeys) {
+    try {
+      if (typeof sc2614RegisterMemberApiKeyForAutoSync === 'function') autoSyncResult = sc2614RegisterMemberApiKeyForAutoSync(key, 'api_login_v2620');
+    } catch (syncErr) {
+      autoSyncResult = {ok:false, error:String(syncErr && syncErr.message || syncErr)};
+      try { Logger.log('v2.6.20 auto member API sync failed, login still allowed: ' + autoSyncResult.error); } catch (logErr) {}
+    }
+  } else if (autoSyncConsent && !boolSetting_('Store_Member_Keys', true)) {
+    autoSyncResult = {ok:false, warning:'Auto-sync consent was given, but Store_Member_Keys is disabled in Settings.'};
+  }
+
+  var session = createSession_({tornId:tornId, name:name, role:role, authSource:'TORN_API_KEY', apiLogin:true, adminToken:false});
+  session.autoMemberApiSync = autoSyncResult;
+  session.apiVerify = {ok:true, method:verified.method, warnings:verified.warnings || []};
+  session.oneTimeDataSync = scAuthHydrateApiLoginData_(key, tornId, name, storeKeys);
+  logAudit_(name, 'scAuthLogin.TORN_API_KEY', 'Verified key fingerprint ' + fp + ', method=' + verified.method + ', stored=' + storeKeys + ', autoSync=' + safeJson_(autoSyncResult || {}).slice(0, 500) + ', oneTimeData=' + safeJson_(session.oneTimeDataSync || {}).slice(0, 500));
+  return session;
+}
+
+function scAuthCreateMemberTokenSession_(token) {
+  var fp = fingerprint_(String(token || ''));
+  var raw = getScriptProps_().getProperty('MEMBER_TOKEN_' + fp);
+  if (!raw) throw new Error('Invalid member token.');
+  var data = JSON.parse(raw);
+  if (new Date(data.expires).getTime() < Date.now()) throw new Error('Expired member token.');
+  var rows = readTable_(APP.SHEETS.MEMBER_TOKENS), row = null;
+  rows.forEach(function(r) { if (String(r.Token_Fingerprint) === fp) row = r; });
+  if (row && String(row.Status).toLowerCase() !== 'active') throw new Error('Token is not active.');
+  if (row) { row.Last_Used = nowIso_(); upsertRowByKey_(APP.SHEETS.MEMBER_TOKENS, 'Token_ID', row.Token_ID, row); }
+  var session = createSession_({tornId:data.tornId, name:data.name || ('Player ' + data.tornId), role:data.role || 'MEMBER', email:'', authSource:'MEMBER_TOKEN', memberTokenLogin:true, adminToken:false, apiLogin:false});
+  logAudit_(session.user.name || session.user.tornId, 'scAuthLogin.MEMBER_TOKEN', 'Member token session created.');
+  return session;
+}
+
+function scAuthLogin(mode, credential, consent, previousSessionId) {
+  mode = String(mode || '').toUpperCase();
+  try {
+    if (previousSessionId) logout(previousSessionId);
+    var session;
+    if (mode === 'ADMIN_TOKEN') session = scAuthCreateAdminSession_(credential);
+    else if (mode === 'TORN_API_KEY') session = scAuthCreateApiSession_(credential, consent || {});
+    else if (mode === 'MEMBER_TOKEN') session = scAuthCreateMemberTokenSession_(credential);
+    else throw new Error('Unsupported auth mode: ' + mode + '. Expected ADMIN_TOKEN, MEMBER_TOKEN, or TORN_API_KEY.');
+    scAuthClearLastError_();
+    return scAuthSessionResponse_(session, mode, {autoMemberApiSync:session.autoMemberApiSync || null, apiVerify:session.apiVerify || null, oneTimeDataSync:session.oneTimeDataSync || null});
+  } catch (err) {
+    scAuthSetLastError_(mode + ': ' + String(err && err.message || err));
+    throw err;
+  }
+}
+
+function scAuthLoginLean(mode, credential, consent, previousSessionId) {
+  // Emergency-compatible login endpoint used only if google.script.run receives
+  // a null payload from scAuthLogin. It returns the smallest possible plain
+  // object while still using the same canonical auth/session creation path.
+  mode = String(mode || '').toUpperCase();
+  try {
+    if (previousSessionId) logout(previousSessionId);
+    var session;
+    if (mode === 'ADMIN_TOKEN') session = scAuthCreateAdminSession_(credential);
+    else if (mode === 'TORN_API_KEY') session = scAuthCreateApiSession_(credential, consent || {});
+    else if (mode === 'MEMBER_TOKEN') session = scAuthCreateMemberTokenSession_(credential);
+    else throw new Error('Unsupported auth mode: ' + mode + '.');
+    scAuthClearLastError_();
+    var user = session.user || {};
+    return scAuthSerializable_({
+      ok:true,
+      sessionId:String(session.sessionId || ''),
+      user:{
+        sessionId:String(session.sessionId || ''),
+        tornId:String(user.tornId || ''),
+        name:String(user.name || ''),
+        role:String(user.role || ''),
+        roleValue:Number(user.roleValue || 0),
+        authSource:String(user.authSource || mode),
+        lastLogin:String(user.lastLogin || user.created || nowIso_()),
+        adminToken:!!user.adminToken,
+        apiLogin:!!user.apiLogin,
+        memberTokenLogin:!!user.memberTokenLogin
+      },
+      authSource:String(user.authSource || mode),
+      version:'2.6.21-lean'
+    });
+  } catch (err) {
+    scAuthSetLastError_(mode + ': ' + String(err && err.message || err));
+    throw err;
+  }
+}
+
+function validateAuthSession_(sessionId) {
+  var session = getSession_(sessionId);
+  if (!session) return {ok:false, error:'No valid session found for that sessionId.', session:null, lastAuthError:scAuthGetLastError_()};
+  if (typeof v2612NormalizeSession_ === 'function') session = v2612NormalizeSession_(session);
+  session.sessionId = String(session.sessionId || sessionId || '');
+  session.authSource = session.authSource || (session.apiLogin ? 'TORN_API_KEY' : (session.memberTokenLogin ? 'MEMBER_TOKEN' : (Number(session.roleValue || 0) >= roleValue_('LEADER') ? 'ADMIN_TOKEN' : 'UNKNOWN')));
+  return {ok:true, session:session, lastAuthError:scAuthGetLastError_()};
+}
+
+function scAuthValidateSession(sessionId) {
+  var validated = validateAuthSession_(sessionId);
+  if (!validated.ok) return validated;
+  return scAuthSessionResponse_({sessionId:sessionId, user:validated.session, expiresInSeconds:sessionPersistentSeconds_()}, 'VALIDATE_SESSION');
+}
+
+// Compatibility wrappers: old client deployments keep working, but all roads now
+// use the canonical login implementation above.
+function sc2619LeaderLogin(token) { return scAuthLogin('ADMIN_TOKEN', token, {}, ''); }
+function sc2619ConnectApiKey(key, consent) { return scAuthLogin('TORN_API_KEY', key, consent || {}, ''); }
+function memberTokenLogin(token) { return scAuthLogin('MEMBER_TOKEN', token, {}, ''); }
+
+function getAuthDebugState(sessionId, page) {
+  var validated = validateAuthSession_(sessionId);
+  var session = validated.session;
+  var roleValue = session ? Number(session.roleValue || 0) : 0;
+  if (!session || roleValue < roleValue_('LEADER')) throw new Error('Auth debug is admin-only. Log in with the admin token first.');
+  page = String(page || 'authdebug');
+  var permission = {page:page, allowed:false, reason:'not checked'};
+  try {
+    var v25 = (typeof getV25State_ === 'function') ? getV25State_(session) : {};
+    var allowed = v25 && v25.allowedPages ? v25.allowedPages.map(function(p){ return String(p); }) : [];
+    permission = {page:page, allowed: allowed.indexOf(page) !== -1 || roleValue >= roleValue_('LEADER'), allowedPagesCount: allowed.length, source:'v25/admin-bypass'};
+  } catch (permErr) {
+    permission = {page:page, allowed:roleValue >= roleValue_('LEADER'), reason:String(permErr && permErr.message || permErr), source:'fallback'};
+  }
+  return {
+    ok:true,
+    browserSessionId:String(sessionId || ''),
+    validatedSession:session,
+    role:session.role,
+    roleValue:session.roleValue,
+    authSource:session.authSource,
+    tornId:session.tornId,
+    name:session.name,
+    permission:permission,
+    lastAuthError:validated.lastAuthError,
+    checkedAt:nowIso_(),
+    version:'2.6.21'
+  };
 }

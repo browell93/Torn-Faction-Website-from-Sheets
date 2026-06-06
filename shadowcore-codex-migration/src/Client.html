@@ -139,10 +139,10 @@ function updateLoginBadge_() {
 
 function validateLoginSession_(session, source) {
   source = source || 'Login';
-  // v2.6.16 supports either a direct session object or a wrapped {ok, session}.
+  // v2.6.16+ supports either a direct session object or a wrapped {ok, session}.
   if (session && session.session && typeof session.session === 'object') session = session.session;
   if (!session || typeof session !== 'object') {
-    throw new Error(source + ' failed: the server returned no session. Make sure Security.gs v2.6.19 is installed and redeployed.');
+    throw new Error(source + ' failed: the server returned no session. Redeploy Security.gs/Client.html v2.6.21, then hard-refresh the web app.');
   }
   if (session.ok === false) {
     throw new Error(source + ' failed: ' + (session.error || session.message || 'Unknown server error.'));
@@ -291,19 +291,21 @@ function renderPerfFailSafe(err) {
 
 function pageTitle(page) {
   return {
-    layout:'My Layout', permissions:'Page Permissions', dashboard:'Dashboard', war:'War Room', battleplan:'Battle Plan', commitments:'War Contracts', strike:'Strike Teams', chain:'Chain Tracker', targets:'Target Board',
+    layout:'My Layout', authdebug:'Auth Debug', permissions:'Page Permissions', dashboard:'Dashboard', war:'War Room', battleplan:'Battle Plan', commitments:'War Contracts', strike:'Strike Teams', chain:'Chain Tracker', targets:'Target Board',
     payouts:'Payout Center', requests:'Armory Requests', recruiting:'Recruiting', vetting:'Applicant Vetting', training:'Training',
     scorecards:'Member Scorecards', oc:'OC Planner', enemy:'Enemy Intel', chainplan:'Chain Planner', economy:'Economy Ledger', discipline:'Discipline', tasks:'Officer Tasks', rulescheck:'Rule Checks', bbcode:'HTML Code Editor', htmlcode:'HTML Code Editor', selfservice:'Self-Service', mobile:'Mobile War',
     treasury:'Treasury', loans:'Loans', revives:'Revive Support', availabilitycal:'Availability Calendar', promotions:'Promotions', awards:'Awards', onboarding:'Onboarding', mentors:'Mentors', knowledge:'Knowledge Base', keyhealth:'API Key Health', polls:'Polls', mylife:'My Faction Life', advisor:'Advisor Center', myadvisor:'My Advisor', membereducation:'Member Education', weeklyreport:'Weekly Reports', coachingqueue:'Coaching Queue', factionneeds:'Faction Needs', microsite:'Recruitment Microsite',
     setup:'Setup Wizard', privacy:'Privacy / API Disclosure', updates:'Version / Updates', backups:'Backups', diagnostics:'Diagnostics', scannerinstall:'Scanner Install', gymgains:'Gym Gains Lab', GymGainComparison:'Gym Comparison', GymGainProjectionView:'Gym Projection', GymGoalEstimatorView:'Goal Estimator', warcountdown:'105h Enemy Watch', MemberActivityTable:'Member Activity Table', ActivityHeatmap:'Activity Heatmap', WarReadinessReportView:'War Readiness Report', scannerdeep:'Scanner Deep Data', visuals:'Graphs / Visuals', scanneroptin:'Scanner Opt-In', recommendations:'Smart Recommendations', taborganizer:'Tab Organizer', tokens:'Member Tokens', commands:'Discord Commands', protection:'Sheet Protection', safemode:'Safe Mode', manual:'Admin Manual', theme:'Theme',
-    comms:'Comms & Reports', settings:'Settings', admin:'Admin'
+    comms:'Comms & Reports', settings:'Settings', admin:'Admin', authdebug:'Auth Debug'
   }[page] || page;
 }
 
 async function connectKey() {
   try {
-    // v2.6.19: API login is an auth-mode switch. Clear any old admin/leader state
-    // BEFORE connecting so a failed API attempt cannot visually fall back to admin.
+    // v2.6.20: API login is an auth-mode switch. Remember the old server
+    // session for logout, then clear browser state before connecting so a failed
+    // API attempt cannot visually fall back to admin.
+    const previousSessionId = state.sessionId || getStoredSessionId_();
     clearClientAuthState_();
     updateLoginBadge_ && updateLoginBadge_();
     const key = document.getElementById('apiKeyInput').value;
@@ -311,9 +313,12 @@ async function connectKey() {
       accepted: document.getElementById('consentInput').checked,
       discord: document.getElementById('discordInput').value,
       selections: document.getElementById('selectionsInput').value,
-      accessLevel: 'Custom/Member'
+      accessLevel: 'Custom/Member',
+      autoSync: !!(document.getElementById('autoSyncConsentInput') && document.getElementById('autoSyncConsentInput').checked)
     };
-    const session = validateLoginSession_(await gas('sc2619ConnectApiKey', key, consent), 'API login');
+    let rawSession = await gas('scAuthLogin', 'TORN_API_KEY', key, consent, previousSessionId);
+    if (!rawSession) rawSession = await gas('scAuthLoginLean', 'TORN_API_KEY', key, consent, '');
+    const session = validateLoginSession_(rawSession, 'API login');
     const baseUser = scNormalizeUser_(session);
     const sessionObj = Object.assign(baseUser, {
       sessionId: session.sessionId,
@@ -322,9 +327,13 @@ async function connectKey() {
       authMode: 'API'
     });
     replaceActiveSession_(session.sessionId, sessionObj);
+    try { document.getElementById('apiKeyInput').value = ''; } catch (e) {}
     const autoSync = session.autoMemberApiSync || {};
+    const oneTimeData = session.oneTimeDataSync || {};
     if (autoSync && autoSync.ok) {
       toast('Connected as ' + (session.user && session.user.name ? session.user.name : 'member') + '. Auto sync is active.');
+    } else if (oneTimeData && oneTimeData.warning) {
+      toast('Connected, but live bars/cooldowns were not available: ' + oneTimeData.warning, true);
     } else if (autoSync && autoSync.error) {
       toast('Connected, but auto sync could not run yet: ' + autoSync.error, true);
     } else {
@@ -337,13 +346,16 @@ async function connectKey() {
 async function leaderLogin() {
   try {
     const token = document.getElementById('leaderTokenInput').value;
-    const session = validateLoginSession_(await gas('sc2619LeaderLogin', token), 'Leader token login');
+    const previousSessionId = state.sessionId || getStoredSessionId_();
+    let rawSession = await gas('scAuthLogin', 'ADMIN_TOKEN', token, {}, previousSessionId);
+    if (!rawSession) rawSession = await gas('scAuthLoginLean', 'ADMIN_TOKEN', token, {}, '');
+    const session = validateLoginSession_(rawSession, 'Leader token login');
     replaceActiveSession_(session.sessionId, {
       sessionId: session.sessionId,
       tornId: 'LEADER',
       name: (session.user && session.user.name) || 'Leader',
-      role: 'Admin',
-      roleValue: 99,
+      role: (session.user && session.user.role) || 'LEADER',
+      roleValue: (session.user && session.user.roleValue) || 5,
       adminToken: true,
       apiLogin: false,
       authMode: 'ADMIN'
@@ -356,12 +368,17 @@ async function leaderLogin() {
 async function memberTokenLogin() {
   try {
     const token = document.getElementById('memberTokenInput').value;
-    const session = validateLoginSession_(await gas('memberTokenLogin', token), 'Member token login');
+    const previousSessionId = state.sessionId || getStoredSessionId_();
+    let rawSession = await gas('scAuthLogin', 'MEMBER_TOKEN', token, {}, previousSessionId);
+    if (!rawSession) rawSession = await gas('scAuthLoginLean', 'MEMBER_TOKEN', token, {}, '');
+    const session = validateLoginSession_(rawSession, 'Member token login');
     const baseUser = scNormalizeUser_(session);
     replaceActiveSession_(session.sessionId, Object.assign(baseUser, {
       sessionId: session.sessionId,
       memberTokenLogin: true,
-      adminToken: false
+      adminToken: false,
+      apiLogin: false,
+      authMode: 'MEMBER_TOKEN'
     }));
     toast('Token login successful.');
     await loadState();
@@ -426,7 +443,7 @@ function renderCurrentPageV26() {
     warcountdown: renderV19WarCountdown, MemberActivityTable: renderV19MemberActivityTable, ActivityHeatmap: renderV19ActivityHeatmap, WarReadinessReportView: renderV19WarReadinessReportView,
     scannerdeep: renderV18ScannerDeep, visuals: renderV18Visuals, scanneroptin: renderV18ScannerOptIn, recommendations: renderV18Recommendations, taborganizer: renderV18TabOrganizer,
     tokens: renderV16Tokens, commands: renderV16Commands, protection: renderV16Protection, safemode: renderV16SafeMode, manual: renderV16Manual, theme: renderV16Theme,
-    comms: renderComms, settings: renderSettings, admin: renderAdmin
+    comms: renderComms, settings: renderSettings, admin: renderAdmin, authdebug: renderAuthDebug
   };
   const fn = map[page] || renderDashboard;
   const publicPages = new Set(['dashboard','microsite','recruiting','privacy']);
@@ -462,7 +479,7 @@ function v25IsAdminSession(){
   return Number(s.roleValue || 0) >= 5 || role === 'LEADER' || role === 'DEVELOPER' || role === 'ADMIN';
 }
 function v25CriticalAdminPages(){
-  return new Set(['permissions','layout','settings','admin','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme']);
+  return new Set(['permissions','layout','settings','admin','authdebug','diagnostics','setup','safemode','backups','updates','tokens','protection','manual','theme']);
 }
 function v25AllowedPages(){
   const base = ['dashboard','microsite','recruiting','privacy'];
@@ -510,6 +527,28 @@ function v25Groups(){
   return grouped;
 }
 
+
+function hasDisplayData_(obj) {
+  return !!(obj && typeof obj === 'object' && Object.keys(obj).some(k => obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== ''));
+}
+function firstDataObject_(...objs) {
+  return objs.find(hasDisplayData_) || {};
+}
+function currentIdentity_() {
+  const d = state.data || {};
+  const session = activeSession_() || d.session || {};
+  const direct = d.v2612MyData || {};
+  const life = d.myFactionLife || {};
+  const raw = firstDataObject_(d.myIdentity, direct.identity, life.member, session);
+  return {
+    Torn_ID: raw.Torn_ID || raw.tornId || raw.id || session.tornId || '',
+    Name: raw.Name || raw.name || session.name || '',
+    Role: raw.Role || raw.role || session.role || '',
+    Session_Source: session.authSource || session.authMode || (session.apiLogin ? 'TORN_API_KEY' : (session.adminToken ? 'ADMIN_TOKEN' : (session.memberTokenLogin ? 'MEMBER_TOKEN' : 'Session'))),
+    Last_Login: session.lastLogin || session.created || ''
+  };
+}
+
 function renderDashboard() {
   const d = state.data || {}, s = d.dashboard || {}, announcements = d.announcements || [];
   const events = (d.events || []).slice(-5).reverse();
@@ -532,7 +571,7 @@ function renderDashboard() {
     </div>
     <div class="grid two">
       <div class="card"><h3>Upcoming events</h3>${table(events, ['Title','Type','Start_Time','Status','Description'])}</div>
-      <div class="card"><h3>My profile</h3>${renderObject(d.myStatus || {})}${renderObject(d.myScorecard || {})}</div>
+      <div class="card"><h3>My profile</h3>${renderObject(currentIdentity_())}${renderObject(firstDataObject_(d.myStatus, d.v2612MyData && d.v2612MyData.status))}${renderObject(firstDataObject_(d.myScorecard, d.v2612MyData && d.v2612MyData.scorecard))}</div>
     </div>
     <div class="card"><h3>Member live status / API fields</h3><p class="muted">Energy, nerve, happy, life, cooldowns, and hospital data fill from member API/scanner readiness snapshots when members opt in.</p>${table((d.memberStatuses || (v22().memberStatusesMerged||[])).slice().reverse(), ['Name','Status','Last_Action','Life','Energy','Nerve','Happy','Hospital_Until','Jail','Travel','Drug_Cooldown','Medical_Cooldown','Booster_Cooldown','Updated'])}</div>`;
 }
@@ -850,14 +889,16 @@ function renderV13MyLife() {
   const session = activeSession_() || d.session || {};
   const life = d.myFactionLife || {};
   const direct = d.v2612MyData || {};
-  const identity = Object.assign({}, direct.identity || {}, life.member || {}, {
-    Torn_ID: (life.member && life.member.Torn_ID) || (direct.identity && direct.identity.Torn_ID) || session.tornId || '',
-    Name: (life.member && life.member.Name) || (direct.identity && direct.identity.Name) || session.name || '',
-    Role: (life.member && life.member.Role) || (direct.identity && direct.identity.Role) || session.role || '',
-    Session_Source: session.apiLogin ? 'API login' : (session.adminToken ? 'Admin token' : (session.memberTokenLogin ? 'Member token' : 'Session'))
+  const identity = Object.assign({}, currentIdentity_(), direct.identity || {}, life.member || {}, {
+    Torn_ID: (life.member && life.member.Torn_ID) || (direct.identity && direct.identity.Torn_ID) || currentIdentity_().Torn_ID,
+    Name: (life.member && life.member.Name) || (direct.identity && direct.identity.Name) || currentIdentity_().Name,
+    Role: (life.member && life.member.Role) || (direct.identity && direct.identity.Role) || currentIdentity_().Role,
+    Session_Source: currentIdentity_().Session_Source,
+    Session_Type: session.authSource || session.authMode || '',
+    Last_Login: currentIdentity_().Last_Login
   });
-  const status = life.status || d.myStatus || direct.status || {};
-  const scorecard = life.scorecard || d.myScorecard || direct.scorecard || {};
+  const status = firstDataObject_(life.status, d.myStatus, direct.status);
+  const scorecard = firstDataObject_(life.scorecard, d.myScorecard, direct.scorecard);
   const hasIdentity = identity.Torn_ID || identity.Name;
   byId('mylife').innerHTML = `
     <div class="card"><h3>My Faction Life</h3><p class="muted">Everything relevant to your faction life in one place. If this page has only your identity, run a sync or install/enable scanner/API snapshots so status fields can fill.</p>${hasIdentity ? renderObject(identity) : '<p class="warnbox">You are logged in, but no Torn identity was returned for this session. Log out, clear site data, then log in with your API key again.</p>'}</div>
@@ -869,6 +910,25 @@ function renderV13MyLife() {
     <div class="card"><h3>Direct member data bridge</h3>${direct && Object.keys(direct).length ? renderObject(direct.counts || {}) : '<p class="muted">Direct bridge did not return data yet.</p>'}<button class="secondary" onclick="debugMyDataV2612()">Debug My Data</button></div>
     <div class="card"><h3>Data troubleshooting</h3><p class="muted">This page matches records by Torn_ID. If your identity shows but sections are empty, the site is working; you just do not have matching rows yet in those modules. Check Members, Member_Status, API_Key_Health, Payouts, Awards, Onboarding, Training_Tracker, and scanner readiness snapshots for your Torn ID.</p><button onclick="loadPageDataV26('mylife')">Refresh My Data</button><button class="secondary" onclick="showPage('scannerinstall',true)">Scanner Setup</button></div>`;
 }
+
+function renderAuthDebug() {
+  const d = state.data || {};
+  const dbg = d.authDebug || {};
+  const browser = {
+    Current_Browser_Session_ID: state.sessionId || getStoredSessionId_() || '',
+    Stored_Session_ID: getStoredSessionId_() || '',
+    Active_Page: state.page || '',
+    Client_Auth_Source: (activeSession_() && (activeSession_().authSource || activeSession_().authMode)) || '',
+    Client_Torn_ID: (activeSession_() && activeSession_().tornId) || '',
+    Client_Name: (activeSession_() && activeSession_().name) || ''
+  };
+  byId('authdebug').innerHTML = `
+    <div class="card"><h3>Auth Debug</h3><p class="muted">Admin-only session diagnostics. This page does not display or store API keys in the browser.</p></div>
+    <div class="grid two"><div class="card"><h3>Browser auth state</h3>${renderObject(browser)}</div><div class="card"><h3>Backend validation</h3>${dbg.ok ? renderObject({Role:dbg.role, Role_Value:dbg.roleValue, Auth_Source:dbg.authSource, Torn_ID:dbg.tornId, Name:dbg.name, Checked_At:dbg.checkedAt}) : '<p class="warnbox">'+esc(dbg.error || 'Auth debug unavailable.')+'</p>'}</div></div>
+    <div class="grid two"><div class="card"><h3>Permission result</h3>${renderObject(dbg.permission || {})}</div><div class="card"><h3>Last auth error</h3><pre class="codebox">${esc(dbg.lastAuthError || 'No auth errors recorded.')}</pre></div></div>
+    <div class="card"><h3>Validated session payload</h3><pre class="codebox">${esc(JSON.stringify(dbg.validatedSession || {}, null, 2))}</pre></div>`;
+}
+
 
 function renderV13Microsite() {
   const d = state.data || {}, rows = d.recruitMicrosite || d.public?.recruitMicrosite || [];
@@ -1133,7 +1193,7 @@ async function setSafeMode(enabled){try{await gas('setSafeModeFromWeb',state.ses
 async function saveThemeV16(){try{await gas('saveThemeSettingFromWeb',state.sessionId,{themeMode:val('themeMode'),accent:val('themeAccent'),background:val('themeBackground'),customDomain:val('themeDomain')});toast('Theme settings saved.');loadState();}catch(err){toast(err.message||String(err),true);}}
 
 function kpi(label,value,cls=''){return `<div class="kpi"><span>${esc(label)}</span><b class="${cls}">${esc(value)}</b></div>`;}
-function table(rows, cols){rows=rows||[];if(!rows.length)return '<p class="muted">No rows yet.</p>';cols=cols||Object.keys(rows[0]);return `<div style="overflow:auto;max-height:520px"><table><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${esc(formatCell(r[c], c))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;}
+function table(rows, cols){rows=rows||[];if(!rows.length)return '<p class="muted">No data yet.</p>';cols=cols||Object.keys(rows[0]);return `<div style="overflow:auto;max-height:520px"><table><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${esc(formatCell(r[c], c))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;}
 function renderObject(obj){if(!obj||!Object.keys(obj).length)return '<p class="muted">No data yet.</p>';return `<table><tbody>${Object.keys(obj).map(k=>`<tr><th>${esc(k)}</th><td>${esc(formatCell(obj[k], k))}</td></tr>`).join('')}</tbody></table>`;}
 function formatCell(v,key=''){if(v===null||v===undefined)return '';if(typeof v==='object')return JSON.stringify(v);const k=String(key||'').toLowerCase();if(/timestamp|updated|date|time|until|last_polled|next_poll|estimate|generated/.test(k)){const t=formatLocalTime12(v);if(t)return t;}if(typeof v==='number'&&Math.abs(v)>10000)return String(v);return String(v);}
 function formatLocalTime12(v){if(v===null||v===undefined||v==='')return '';let d=null;if(typeof v==='number'&&v>1000000000){d=new Date(v*(v>9999999999?1:1000));}else{const s=String(v).trim();if(/^\d+$/.test(s)&&Number(s)>1000000000)d=new Date(Number(s)*(Number(s)>9999999999?1:1000));else if(/T|GMT|UTC|\d{4}-\d{2}-\d{2}/.test(s))d=new Date(s);}if(!d||isNaN(d.getTime()))return '';return d.toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',hour12:true});}

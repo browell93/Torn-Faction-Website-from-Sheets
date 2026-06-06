@@ -16,13 +16,17 @@ function setupShadowCoreV26PerformancePatch() {
 function getPageStateV26(sessionId, page) {
   page = String(page || 'dashboard');
   if (page === 'htmlcode') page = 'bbcode';
-  var session = getSession_(sessionId);
+  var auth = (typeof validateAuthSession_ === 'function') ? validateAuthSession_(sessionId) : {ok:!!getSession_(sessionId), session:getSession_(sessionId), lastAuthError:''};
+  var session = auth.session;
   if (typeof v2612NormalizeSession_ === 'function') session = v2612NormalizeSession_(session);
   var data = {
     public: getPublicStateV26_(page),
     session: session,
-    v26: {version:'2.6.0', page:page, lazy:true}
+    v26: {version:'2.6.20', page:page, lazy:true, authValidated:!!(auth && auth.ok), lastAuthError:(auth && auth.lastAuthError) || ''}
   };
+  if (page === 'authdebug') {
+    data.authDebug = (typeof getAuthDebugState === 'function') ? v26SafeCall_(function(){ return getAuthDebugState(sessionId, page); }, {ok:false, error:'Auth debug unavailable or denied.'}) : {ok:false, error:'Auth debug function missing.'};
+  }
   // v25 controls the menu, permissions, and default page. Keep it in every payload.
   if (session && typeof getV25State_ === 'function') data.v25 = v26SafeCall_(function(){ return getV25State_(session); }, {});
   if (!session) {
@@ -134,6 +138,7 @@ function v26AddPageData_(data, session, role, page) {
     case 'polls': data.activePolls=v26SafeCall_(function(){return getActivePollsForSession_(session);},[]); data.polls=role>=APP.ROLES.OFFICER?v26Read_(APP.SHEETS.POLLS,L):data.activePolls; data.pollVotes=role>=APP.ROLES.OFFICER?v26Read_(APP.SHEETS.POLL_VOTES,L):[]; break;
     case 'mylife': data.v2612MyData=(typeof v2612BuildMyData_==='function')?v26SafeCall_(function(){return v2612BuildMyData_(session);},{}):{}; data.myFactionLife=v26SafeCall_(function(){return getMyFactionLifeV2611_(session);},{}); data.myPayouts=(data.v2612MyData&&data.v2612MyData.payouts)||v26ReadByTorn_(APP.SHEETS.PAYOUTS,session.tornId,50); data.myLoans=(data.v2612MyData&&data.v2612MyData.loans)||v26ReadByTorn_(APP.SHEETS.LOAN_COLLATERAL,session.tornId,50); data.myAwards=(data.v2612MyData&&data.v2612MyData.awards)||v26ReadByTorn_(APP.SHEETS.AWARDS,session.tornId,50); data.myOnboarding=(data.v2612MyData&&data.v2612MyData.onboarding)||v26ReadByTorn_(APP.SHEETS.ONBOARDING,session.tornId,50); data.myMentorships=(data.v2612MyData&&data.v2612MyData.mentors)||v26ReadMentors_(session.tornId,50); break;
     case 'layout': case 'permissions': data.v25=(typeof getV25State_==='function')?v26SafeCall_(function(){return getV25State_(session);},{}):{}; break;
+    case 'authdebug': data.authDebug=(typeof getAuthDebugState==='function')?v26SafeCall_(function(){return getAuthDebugState(session.sessionId || '', page);},{ok:false,error:'Auth debug unavailable or denied.'}):{ok:false,error:'Auth debug function missing.'}; break;
     case 'advisor': case 'myadvisor': case 'membereducation': case 'weeklyreport': case 'coachingqueue': case 'factionneeds': data.v24=(typeof getV24State_==='function')?v26SafeCall_(function(){return getV24State_(session);},{}):{}; break;
     case 'microsite': data.recruitMicrosite=v26Read_(APP.SHEETS.RECRUIT_MICROSITE,L,function(s){return String(s.Active).toUpperCase()==='TRUE';}); break;
     case 'setup': case 'updates': case 'backups': case 'diagnostics': case 'scannerinstall': case 'tokens': case 'commands': case 'protection': case 'safemode': case 'manual': case 'theme': data.v16=(typeof getV16State_==='function')?v26SafeCall_(getV16State_,{}):{}; break;
