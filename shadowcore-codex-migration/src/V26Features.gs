@@ -100,11 +100,48 @@ function v26AddCommonMemberData_(data, session, page) {
 
   if (page === 'dashboard') {
     data.dashboard = v26SafeCall_(dashboardSummary_, {});
+    data.dashboard = v26DashboardWithSessionFallback_(data.dashboard, session, data.myStatus, data.myIdentity);
     data.announcements = data.public.announcements || [];
     data.events = v26Read_(APP.SHEETS.EVENTS, 5);
     data.v22 = (typeof getV22State_ === 'function') ? v26SafeCall_(function(){ return getV22State_(session); }, {}) : {};
     data.memberStatuses = (typeof v22MergedMemberStatuses_ === 'function') ? v26SafeCall_(function(){ return v22MergedMemberStatuses_().slice(-150); }, []) : v26Read_(APP.SHEETS.MEMBER_STATUS, 150);
+    data.memberStatuses = v26RowsWithSessionStatus_(data.memberStatuses, session, data.myStatus);
   }
+}
+
+function v26RowsWithSessionStatus_(rows, session, status) {
+  rows = Array.isArray(rows) ? rows.slice() : [];
+  status = status || {};
+  session = session || {};
+  if (!status || Object.keys(status).length === 0) return rows;
+  var tornId = String(status.Torn_ID || session.tornId || '');
+  if (!tornId) return rows;
+  var found = rows.some(function(row) { return String(row.Torn_ID || row.Player_ID || row.User_ID || '') === tornId; });
+  if (!found) {
+    var row = Object.assign({Torn_ID:tornId, Name:session.name || '', Source:'session auth bridge'}, status);
+    if (!row.Name) row.Name = session.name || '';
+    rows.push(row);
+  }
+  return rows;
+}
+
+function v26DashboardWithSessionFallback_(summary, session, status, identity) {
+  summary = summary || {};
+  session = session || {};
+  status = status || {};
+  identity = identity || {};
+  var tornId = String(status.Torn_ID || identity.Torn_ID || session.tornId || '');
+  if (!tornId) return summary;
+  if (!Number(summary.members || 0)) summary.members = 1;
+  var hasStatusCounts = Number(summary.available || 0) || Number(summary.hospitalized || 0) || Number(summary.jailed || 0) || Number(summary.traveling || 0);
+  if (!hasStatusCounts && Object.keys(status).length) {
+    var text = String(status.Status || status.state || '').toLowerCase();
+    if (text.indexOf('hospital') !== -1) summary.hospitalized = 1;
+    else if (text.indexOf('jail') !== -1) summary.jailed = 1;
+    else if (text.indexOf('travel') !== -1 || text.indexOf('abroad') !== -1) summary.traveling = 1;
+    else summary.available = 1;
+  }
+  return summary;
 }
 
 function v26AddPageData_(data, session, role, page) {

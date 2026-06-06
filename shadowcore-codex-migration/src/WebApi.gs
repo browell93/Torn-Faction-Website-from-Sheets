@@ -2,13 +2,14 @@
  * ShadowCore HQ - Functions called by the web frontend.
  */
 
-function getPublicState() {
+function getPublicState(read) {
+  read = read || readTable_;
   return {
     app: {name: factionName_() + ' HQ', version: APP.VERSION, factionId: factionId_()},
-    announcements: readTable_(APP.SHEETS.ANNOUNCEMENTS).filter(function(a) { return String(a.Active).toUpperCase() === 'TRUE'; }).slice(-5),
-    rules: readTable_(APP.SHEETS.RULES).filter(function(r) { return String(r.Active).toUpperCase() === 'TRUE'; }),
-    knowledgeBasePublic: readTable_(APP.SHEETS.KNOWLEDGE_BASE).filter(function(a) { return String(a.Active).toUpperCase() === 'TRUE' && /public|all/i.test(String(a.Audience || 'All')); }).slice(-50),
-    recruitMicrosite: readTable_(APP.SHEETS.RECRUIT_MICROSITE).filter(function(s) { return String(s.Active).toUpperCase() === 'TRUE'; }).sort(function(a,b){return Number(a.Sort)-Number(b.Sort);}),
+    announcements: activeRows_(read(APP.SHEETS.ANNOUNCEMENTS)).slice(-5),
+    rules: activeRows_(read(APP.SHEETS.RULES)),
+    knowledgeBasePublic: activeRows_(read(APP.SHEETS.KNOWLEDGE_BASE)).filter(function(a) { return /public|all/i.test(String(a.Audience || 'All')); }).slice(-50),
+    recruitMicrosite: activeRows_(read(APP.SHEETS.RECRUIT_MICROSITE)).sort(numericSort_('Sort')),
     apiDisclosure: setting_('Required_Key_Disclosure', requiredCustomSelectionsText_()),
     privacyDisclosure: (typeof privacyDisclosureText_ === 'function') ? privacyDisclosureText_() : '',
     theme: {mode: setting_('Theme_Mode','Anthracite'), accent: setting_('Theme_Accent','#f59e0b'), background: setting_('Theme_Background','#05070a'), customDomain: setting_('Public_Custom_Domain','')},
@@ -16,37 +17,74 @@ function getPublicState() {
   };
 }
 
+function buildTableReader_() {
+  var cache = {};
+  return function(sheetName) {
+    if (!Object.prototype.hasOwnProperty.call(cache, sheetName)) cache[sheetName] = readTable_(sheetName);
+    return cache[sheetName];
+  };
+}
+
+function rowsForTornId_(rows, tornId, field) {
+  field = field || 'Torn_ID';
+  var id = String(tornId || '');
+  return rows.filter(function(row) { return String(row[field]) === id; });
+}
+
+function activeRows_(rows) {
+  return rows.filter(function(row) { return String(row.Active).toUpperCase() === 'TRUE'; });
+}
+
+function numericSort_(field) {
+  return function(a, b) {
+    var left = Number(a[field]);
+    var right = Number(b[field]);
+    if (!isFinite(left)) left = 0;
+    if (!isFinite(right)) right = 0;
+    return left - right;
+  };
+}
+
 function getAppState(sessionId) {
   var session = getSession_(sessionId);
-  var publicState = getPublicState();
+  var read = buildTableReader_();
+  var publicState = getPublicState(read);
   if (!session) {
     return {public: publicState, session: null};
   }
-  var role = session.roleValue;
+  var role = Number(session.roleValue || 0);
+  var tornId = String(session.tornId || '');
+  var payouts = read(APP.SHEETS.PAYOUTS);
+  var armoryRequests = read(APP.SHEETS.ARMORY_REQUESTS);
+  var warTargets = read(APP.SHEETS.WAR_TARGETS);
+  var trainingTracker = read(APP.SHEETS.TRAINING_TRACKER);
+  var knowledgeBase = read(APP.SHEETS.KNOWLEDGE_BASE);
+  var reports = read(APP.SHEETS.REPORTS);
+
   var data = {
     public: publicState,
     session: session,
-    dashboard: dashboardSummary_(),
-    myScorecard: myScorecard_(session.tornId),
-    myStatus: myStatus_(session.tornId),
-    myPayouts: readTable_(APP.SHEETS.PAYOUTS).filter(function(p) { return String(p.Torn_ID) === String(session.tornId); }).slice(-20),
-    myRequests: readTable_(APP.SHEETS.ARMORY_REQUESTS).filter(function(r) { return String(r.Torn_ID) === String(session.tornId); }).slice(-20),
-    events: readTable_(APP.SHEETS.EVENTS).slice(-100),
-    reports: readTable_(APP.SHEETS.REPORTS).slice(-20),
+    dashboard: dashboardSummary_(read),
+    myScorecard: firstRowForTornId_(read(APP.SHEETS.MEMBER_SCORECARDS), tornId),
+    myStatus: firstRowForTornId_(read(APP.SHEETS.MEMBER_STATUS), tornId),
+    myPayouts: rowsForTornId_(payouts, tornId).slice(-20),
+    myRequests: rowsForTornId_(armoryRequests, tornId).slice(-20),
+    events: read(APP.SHEETS.EVENTS).slice(-100),
+    reports: reports.slice(-20),
     announcements: publicState.announcements,
-    mobileWarView: session ? getMobileWarView_(session.tornId) : null,
-    myAssignments: session ? readTable_(APP.SHEETS.WAR_TARGETS).filter(function(t) { return String(t.Assigned_To_ID) === String(session.tornId); }).slice(-20) : [],
-    myTraining: session ? readTable_(APP.SHEETS.TRAINING_TRACKER).filter(function(t) { return String(t.Torn_ID) === String(session.tornId); }).slice(-10) : [],
-    myAvailability: session ? readTable_(APP.SHEETS.MEMBER_AVAILABILITY).filter(function(a) { return String(a.Torn_ID) === String(session.tornId); }).slice(-10) : [],
-    myFactionLife: session ? getMyFactionLife_(session.tornId) : null,
-    myLoans: session ? readTable_(APP.SHEETS.LOAN_COLLATERAL).filter(function(l) { return String(l.Torn_ID) === String(session.tornId); }).slice(-20) : [],
-    myRevives: session ? readTable_(APP.SHEETS.REVIVE_BOARD).filter(function(r) { return String(r.Torn_ID) === String(session.tornId); }).slice(-20) : [],
-    myAwards: session ? readTable_(APP.SHEETS.AWARDS).filter(function(a) { return String(a.Torn_ID) === String(session.tornId); }).slice(-50) : [],
-    myOnboarding: session ? readTable_(APP.SHEETS.ONBOARDING).filter(function(o) { return String(o.Torn_ID) === String(session.tornId); }).slice(-50) : [],
-    myMentorships: session ? readTable_(APP.SHEETS.MENTORSHIPS).filter(function(m) { return String(m.Mentee_ID) === String(session.tornId) || String(m.Mentor_ID) === String(session.tornId); }).slice(-20) : [],
-    myApiKeyHealth: session ? readTable_(APP.SHEETS.API_KEY_HEALTH).filter(function(h) { return String(h.Torn_ID) === String(session.tornId); }).slice(-3) : [],
-    activePolls: session ? getActivePollsForSession_(session) : [],
-    knowledgeBase: session ? readTable_(APP.SHEETS.KNOWLEDGE_BASE).filter(function(a) { return String(a.Active).toUpperCase() === 'TRUE'; }).slice(-100) : publicState.knowledgeBasePublic,
+    mobileWarView: getMobileWarView_(tornId),
+    myAssignments: rowsForTornId_(warTargets, tornId, 'Assigned_To_ID').slice(-20),
+    myTraining: rowsForTornId_(trainingTracker, tornId).slice(-10),
+    myAvailability: rowsForTornId_(read(APP.SHEETS.MEMBER_AVAILABILITY), tornId).slice(-10),
+    myFactionLife: getMyFactionLife_(tornId),
+    myLoans: rowsForTornId_(read(APP.SHEETS.LOAN_COLLATERAL), tornId).slice(-20),
+    myRevives: rowsForTornId_(read(APP.SHEETS.REVIVE_BOARD), tornId).slice(-20),
+    myAwards: rowsForTornId_(read(APP.SHEETS.AWARDS), tornId).slice(-50),
+    myOnboarding: rowsForTornId_(read(APP.SHEETS.ONBOARDING), tornId).slice(-50),
+    myMentorships: read(APP.SHEETS.MENTORSHIPS).filter(function(m) { return String(m.Mentee_ID) === tornId || String(m.Mentor_ID) === tornId; }).slice(-20),
+    myApiKeyHealth: rowsForTornId_(read(APP.SHEETS.API_KEY_HEALTH), tornId).slice(-3),
+    activePolls: getActivePollsForSession_(session),
+    knowledgeBase: activeRows_(knowledgeBase).slice(-100),
     v16Privacy: (typeof getPrivacyDisclosure === 'function') ? getPrivacyDisclosure() : null,
     v20: (typeof getV20State_ === 'function') ? getV20State_() : null,
     v22: (typeof getV22State_ === 'function') ? getV22State_(session) : null,
@@ -54,41 +92,41 @@ function getAppState(sessionId) {
     v25: (typeof getV25State_ === 'function') ? getV25State_(session) : null
   };
   if (role >= APP.ROLES.CORE) {
-    data.warTargets = readTable_(APP.SHEETS.WAR_TARGETS).slice(-200);
-    data.chainLog = readTable_(APP.SHEETS.CHAIN_LOG).slice(-50);
+    data.warTargets = warTargets.slice(-200);
+    data.chainLog = read(APP.SHEETS.CHAIN_LOG).slice(-50);
   }
   if (role >= APP.ROLES.OFFICER) {
-    data.applications = readTable_(APP.SHEETS.APPLICATIONS).slice(-200);
-    data.armoryRequests = readTable_(APP.SHEETS.ARMORY_REQUESTS).slice(-200);
-    data.enemyPlayers = readTable_(APP.SHEETS.ENEMY_PLAYERS).slice(-200);
-    data.ocPlanner = readTable_(APP.SHEETS.OC_PLANNER).slice(-200);
-    data.warCommitments = readTable_(APP.SHEETS.WAR_COMMITMENTS).slice(-300);
-    data.strikeTeams = readTable_(APP.SHEETS.STRIKE_TEAMS).slice(-500);
-    data.discipline = readTable_(APP.SHEETS.DISCIPLINE).slice(-300);
-    data.economyLedger = readTable_(APP.SHEETS.ECONOMY_LEDGER).slice(-500);
-    data.trainingTracker = readTable_(APP.SHEETS.TRAINING_TRACKER).slice(-300);
-    data.applicantVetting = readTable_(APP.SHEETS.APPLICANT_VETTING).slice(-300);
-    data.chainPlans = readTable_(APP.SHEETS.CHAIN_PLANS).slice(-100);
-    data.bbcodeSnippets = readTable_(APP.SHEETS.BBCODE_SNIPPETS).slice(-100);
-    data.htmlSnippets = readTable_(APP.SHEETS.HTML_SNIPPETS).slice(-150);
-    data.officerTasks = readTable_(APP.SHEETS.OFFICER_TASKS).slice(-300);
-    data.ruleChecks = readTable_(APP.SHEETS.RULE_CHECKS).slice(-500);
-    data.enemyFactions = readTable_(APP.SHEETS.ENEMY_FACTIONS).slice(-200);
-    data.battlePlans = readTable_(APP.SHEETS.BATTLE_PLANS).slice(-100);
-    data.bankLedger = readTable_(APP.SHEETS.BANK_LEDGER).slice(-500);
-    data.treasuryReports = readTable_(APP.SHEETS.TREASURY_REPORTS).slice(-100);
-    data.loans = readTable_(APP.SHEETS.LOAN_COLLATERAL).slice(-500);
-    data.reviveBoard = readTable_(APP.SHEETS.REVIVE_BOARD).slice(-500);
-    data.availabilityCalendar = readTable_(APP.SHEETS.AVAILABILITY_CALENDAR).slice(-500);
-    data.promotions = readTable_(APP.SHEETS.PROMOTIONS).slice(-500);
-    data.awards = readTable_(APP.SHEETS.AWARDS).slice(-500);
-    data.onboarding = readTable_(APP.SHEETS.ONBOARDING).slice(-500);
-    data.mentorships = readTable_(APP.SHEETS.MENTORSHIPS).slice(-500);
-    data.knowledgeBase = readTable_(APP.SHEETS.KNOWLEDGE_BASE).slice(-500);
-    data.apiKeyHealth = readTable_(APP.SHEETS.API_KEY_HEALTH).slice(-500);
-    data.polls = readTable_(APP.SHEETS.POLLS).slice(-300);
-    data.pollVotes = readTable_(APP.SHEETS.POLL_VOTES).slice(-1000);
-    data.recruitMicrosite = readTable_(APP.SHEETS.RECRUIT_MICROSITE).slice(-100);
+    data.applications = read(APP.SHEETS.APPLICATIONS).slice(-200);
+    data.armoryRequests = armoryRequests.slice(-200);
+    data.enemyPlayers = read(APP.SHEETS.ENEMY_PLAYERS).slice(-200);
+    data.ocPlanner = read(APP.SHEETS.OC_PLANNER).slice(-200);
+    data.warCommitments = read(APP.SHEETS.WAR_COMMITMENTS).slice(-300);
+    data.strikeTeams = read(APP.SHEETS.STRIKE_TEAMS).slice(-500);
+    data.discipline = read(APP.SHEETS.DISCIPLINE).slice(-300);
+    data.economyLedger = read(APP.SHEETS.ECONOMY_LEDGER).slice(-500);
+    data.trainingTracker = trainingTracker.slice(-300);
+    data.applicantVetting = read(APP.SHEETS.APPLICANT_VETTING).slice(-300);
+    data.chainPlans = read(APP.SHEETS.CHAIN_PLANS).slice(-100);
+    data.bbcodeSnippets = read(APP.SHEETS.BBCODE_SNIPPETS).slice(-100);
+    data.htmlSnippets = read(APP.SHEETS.HTML_SNIPPETS).slice(-150);
+    data.officerTasks = read(APP.SHEETS.OFFICER_TASKS).slice(-300);
+    data.ruleChecks = read(APP.SHEETS.RULE_CHECKS).slice(-500);
+    data.enemyFactions = read(APP.SHEETS.ENEMY_FACTIONS).slice(-200);
+    data.battlePlans = read(APP.SHEETS.BATTLE_PLANS).slice(-100);
+    data.bankLedger = read(APP.SHEETS.BANK_LEDGER).slice(-500);
+    data.treasuryReports = read(APP.SHEETS.TREASURY_REPORTS).slice(-100);
+    data.loans = read(APP.SHEETS.LOAN_COLLATERAL).slice(-500);
+    data.reviveBoard = read(APP.SHEETS.REVIVE_BOARD).slice(-500);
+    data.availabilityCalendar = read(APP.SHEETS.AVAILABILITY_CALENDAR).slice(-500);
+    data.promotions = read(APP.SHEETS.PROMOTIONS).slice(-500);
+    data.awards = read(APP.SHEETS.AWARDS).slice(-500);
+    data.onboarding = read(APP.SHEETS.ONBOARDING).slice(-500);
+    data.mentorships = read(APP.SHEETS.MENTORSHIPS).slice(-500);
+    data.knowledgeBase = knowledgeBase.slice(-500);
+    data.apiKeyHealth = read(APP.SHEETS.API_KEY_HEALTH).slice(-500);
+    data.polls = read(APP.SHEETS.POLLS).slice(-300);
+    data.pollVotes = read(APP.SHEETS.POLL_VOTES).slice(-1000);
+    data.recruitMicrosite = read(APP.SHEETS.RECRUIT_MICROSITE).slice(-100);
     data.v16Officer = (typeof getV16State_ === 'function') ? getV16State_() : null;
     data.v18 = (typeof getV18State_ === 'function') ? getV18State_() : null;
     data.v19 = (typeof getV19State_ === 'function') ? getV19State_() : null;
@@ -96,15 +134,15 @@ function getAppState(sessionId) {
     data.v23 = (typeof getV23HtmlEditorState_ === 'function') ? getV23HtmlEditorState_() : null;
   }
   if (role >= APP.ROLES.LEADER) {
-    data.members = readTable_(APP.SHEETS.MEMBERS).slice(-500);
-    data.memberStatuses = (typeof v22MergedMemberStatuses_ === 'function' ? v22MergedMemberStatuses_() : readTable_(APP.SHEETS.MEMBER_STATUS)).slice(-500);
-    data.scorecards = readTable_(APP.SHEETS.MEMBER_SCORECARDS).slice(-500);
-    data.payouts = readTable_(APP.SHEETS.PAYOUTS).slice(-500);
-    data.reports = readTable_(APP.SHEETS.REPORTS).slice(-50);
-    data.wars = readTable_(APP.SHEETS.WARS).slice(-100);
-    data.audit = readTable_(APP.SHEETS.AUDIT_LOG).slice(-80);
+    data.members = read(APP.SHEETS.MEMBERS).slice(-500);
+    data.memberStatuses = (typeof v22MergedMemberStatuses_ === 'function' ? v22MergedMemberStatuses_() : read(APP.SHEETS.MEMBER_STATUS)).slice(-500);
+    data.scorecards = read(APP.SHEETS.MEMBER_SCORECARDS).slice(-500);
+    data.payouts = payouts.slice(-500);
+    data.reports = reports.slice(-50);
+    data.wars = read(APP.SHEETS.WARS).slice(-100);
+    data.audit = read(APP.SHEETS.AUDIT_LOG).slice(-80);
     data.settings = publicSettings_();
-    data.errors = readTable_(APP.SHEETS.ERRORS).slice(-50);
+    data.errors = read(APP.SHEETS.ERRORS).slice(-50);
     data.v16 = (typeof getV16State_ === 'function') ? getV16State_() : null;
     data.v18 = (typeof getV18State_ === 'function') ? getV18State_() : null;
     data.v19 = (typeof getV19State_ === 'function') ? getV19State_() : null;
@@ -114,11 +152,14 @@ function getAppState(sessionId) {
   return data;
 }
 
-function dashboardSummary_() {
-  var members = readTable_(APP.SHEETS.MEMBERS);
-  var statuses = readTable_(APP.SHEETS.MEMBER_STATUS);
-  var payouts = readTable_(APP.SHEETS.PAYOUTS);
-  var chain = readTable_(APP.SHEETS.CHAIN_LOG).slice(-1)[0] || {};
+function dashboardSummary_(read) {
+  read = read || readTable_;
+  var members = read(APP.SHEETS.MEMBERS);
+  var statuses = read(APP.SHEETS.MEMBER_STATUS);
+  var payouts = read(APP.SHEETS.PAYOUTS);
+  var applications = read(APP.SHEETS.APPLICATIONS);
+  var armoryRequests = read(APP.SHEETS.ARMORY_REQUESTS);
+  var chain = read(APP.SHEETS.CHAIN_LOG).slice(-1)[0] || {};
   var okay = 0, hosp = 0, jail = 0, travel = 0;
   statuses.forEach(function(s) {
     var t = String(s.Status || '').toLowerCase();
@@ -139,19 +180,22 @@ function dashboardSummary_() {
     chainDanger: chain.Danger_Level || '',
     nextBonus: chain.Next_Bonus || '',
     unpaidPayouts: unpaid,
-    pendingApplications: readTable_(APP.SHEETS.APPLICATIONS).filter(function(a) { return !a.Status || String(a.Status).toLowerCase() === 'new'; }).length,
-    pendingRequests: readTable_(APP.SHEETS.ARMORY_REQUESTS).filter(function(r) { return !r.Status || String(r.Status).toLowerCase() === 'pending'; }).length
+    pendingApplications: applications.filter(function(a) { return !a.Status || String(a.Status).toLowerCase() === 'new'; }).length,
+    pendingRequests: armoryRequests.filter(function(r) { return !r.Status || String(r.Status).toLowerCase() === 'pending'; }).length
   };
 }
 
-function myScorecard_(tornId) {
-  var rows = readTable_(APP.SHEETS.MEMBER_SCORECARDS).filter(function(r) { return String(r.Torn_ID) === String(tornId); });
+function firstRowForTornId_(rows, tornId) {
+  rows = rowsForTornId_(rows, tornId);
   return rows.length ? rows[0] : null;
 }
 
+function myScorecard_(tornId) {
+  return firstRowForTornId_(readTable_(APP.SHEETS.MEMBER_SCORECARDS), tornId);
+}
+
 function myStatus_(tornId) {
-  var rows = readTable_(APP.SHEETS.MEMBER_STATUS).filter(function(r) { return String(r.Torn_ID) === String(tornId); });
-  return rows.length ? rows[0] : null;
+  return firstRowForTornId_(readTable_(APP.SHEETS.MEMBER_STATUS), tornId);
 }
 
 function publicSettings_() {
